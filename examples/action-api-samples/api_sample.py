@@ -13,6 +13,38 @@ def get_adopt_env() -> AdoptEnv:
     """Get the Adopt environment variables."""
     return read_env()
 
+def get_auth_token() -> str:
+    """Get authentication token from Adopt API."""
+    adopt_env = get_adopt_env()
+    
+    # Authenticate with Adopt API to get bearer token
+    auth_url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
+    
+    auth_payload = {
+        'clientId': adopt_env.ADOPT_CLIENT_ID,
+        'secret': adopt_env.ADOPT_CLIENT_SECRET,
+    }
+    
+    print(f"Authenticating with Adopt API at: {auth_url}")
+    auth_response = requests.post(auth_url, json=auth_payload)
+    
+    if auth_response.status_code != 200:
+        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
+        print(f"Response: {auth_response.text}")
+        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
+    
+    # Extract access token from response
+    auth_data = auth_response.json()
+    access_token = auth_data.get('access_token')
+    
+    if not access_token:
+        print("No access token received from authentication response")
+        print(f"Response: {auth_data}")
+        raise ValueError("No access token received from authentication response")
+    
+    print("Successfully authenticated with Adopt API")
+    return access_token
+
 def load_adopt_profile() -> Dict[str, Any]:
     """Load the adopt profile configuration from adopt_profile.json."""
     # Get the directory of this script
@@ -61,32 +93,8 @@ def sync_adopt_actions() -> None:
         # Get environment variables
         adopt_env = get_adopt_env()
 
-        # Authenticate with Adopt API to get bearer token
-        auth_url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
-
-        auth_payload = {
-            'clientId': adopt_env.ADOPT_CLIENT_ID,
-            'secret': adopt_env.ADOPT_CLIENT_SECRET,
-        }
-
-        print(f"Authenticating with Adopt API at: {auth_url}")
-        auth_response = requests.post(auth_url, json=auth_payload)
-        
-        if auth_response.status_code != 200:
-            print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
-            print(f"Response: {auth_response.text}")
-            return
-        
-        # Extract access token from response
-        auth_data = auth_response.json()
-        access_token = auth_data.get('access_token')
-        
-        if not access_token:
-            print("No access token received from authentication response")
-            print(f"Response: {auth_data}")
-            return
-        
-        print("Successfully authenticated with Adopt API")
+        # Get authentication token
+        access_token = get_auth_token()
         
         # Now sync actions with the training pipeline
         # This would typically involve calling an actions sync endpoint
@@ -122,27 +130,9 @@ def list_actions() -> AdoptActionListResponse:
 
     adopt_env = get_adopt_env()
 
-    # first let's hit the auth API with the PAT to get a bearer token
-    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
-    auth_response = requests.post(url, json={
-        'clientId': adopt_env.ADOPT_CLIENT_ID,
-        'secret': adopt_env.ADOPT_CLIENT_SECRET,
-    })
-    if auth_response.status_code != 200:
-        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
-        print(f"Response: {auth_response.text}")
-        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
+    # Get authentication token
+    access_token = get_auth_token()
     
-    # Extract access token from response
-    auth_data = auth_response.json()
-    access_token = auth_data.get('access_token')
-    
-    if not access_token:
-        print("No access token received from authentication response")
-        print(f"Response: {auth_data}")
-        raise ValueError("No access token received from authentication response")
-
-    print("Successfully authenticated with Adopt API")
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/list"
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -169,25 +159,9 @@ def run_list_actions_message(profile: Dict[str, Any]) -> str:
     """Running a list actions meta message via APIs."""
     adopt_env = get_adopt_env()
 
-    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
-    auth_response = requests.post(url, json={
-        'clientId': adopt_env.ADOPT_CLIENT_ID,
-        'secret': adopt_env.ADOPT_CLIENT_SECRET,
-    })
-    if auth_response.status_code != 200:
-        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
-        print(f"Response: {auth_response.text}")
-        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
-    
-    auth_data = auth_response.json()
-    access_token = auth_data.get('access_token')
+    # Get authentication token
+    access_token = get_auth_token()
         
-    if not access_token:
-        print("No access token received from authentication response")
-        print(f"Response: {auth_data}")
-        raise ValueError("No access token received from authentication response")
-        
-    print("Successfully authenticated with Adopt API")
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
         "Authorization": f"Bearer {access_token}"
@@ -222,26 +196,9 @@ def run_action(command: str, profile: Dict[str, Any]) -> str:
     """Test running a specific action via langchain adapter."""
     adopt_env = get_adopt_env()
 
-    # now let's hit the auth API with the PAT to get a bearer token
-    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
-    auth_response = requests.post(url, json={
-        'clientId': adopt_env.ADOPT_CLIENT_ID,
-        'secret': adopt_env.ADOPT_CLIENT_SECRET,
-    })
-    if auth_response.status_code != 200:
-        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
-        print(f"Response: {auth_response.text}")
-        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
-    
-    auth_data = auth_response.json()
-    access_token = auth_data.get('access_token')
+    # Get authentication token
+    access_token = get_auth_token()
         
-    if not access_token:
-        print("No access token received from authentication response")
-        print(f"Response: {auth_data}")
-        raise ValueError("No access token received from authentication response")
-        
-    print("Successfully authenticated with Adopt API")
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
         "Authorization": f"Bearer {access_token}"
