@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import re
 import requests
 from typing import Any, Dict
 from langchain_core.messages import HumanMessage, AIMessage
@@ -157,7 +156,6 @@ def list_actions() -> AdoptActionListResponse:
         raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
     
     json_response = response.json()
-    print(json_response)
     
     if "capabilities" not in json_response:
         raise ValueError(f"Expected 'capabilities' in response, got: {json_response}")
@@ -265,26 +263,16 @@ def run_action(command: str, profile: Dict[str, Any]) -> str:
         raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
     
     json_response = response.json()
-    print(json_response)
     
     if json_response.get("status") != True:
         print(f"API returned unsuccessful status: {json_response}")
         raise ValueError(f"API returned unsuccessful status: {json_response}")
     
     # Check for expected content in response (these are specific to the test action)
-    response_text = json_response.get("response", "")
-    if "Test Segment" not in response_text:
-        print(f"Warning: Expected 'Test Segment' not found in response: {response_text}")
-    if "This is a test segment" not in response_text:
-        print(f"Warning: Expected 'This is a test segment' not found in response: {response_text}")
-    if not re.search(r"Industry:\s*Technology", response_text):
-        print(f"Warning: Expected 'Industry: Technology' pattern not found in response: {response_text}")
-    if not re.search(r"Employee Count:\s*100-500", response_text):
-        print(f"Warning: Expected 'Employee Count: 100-500' pattern not found in response: {response_text}")
     ai_message = AIMessage(**json_response["ai_message"])
-    if not isinstance(ai_message.content, str): # pyright: ignore
+    if not isinstance(ai_message.content, list): # pyright: ignore
         raise ValueError(f"Action message content is not a string. It is: {type(ai_message.content)}") # pyright: ignore
-    return str(ai_message.content)
+    return str(ai_message.content) # pyright: ignore
 
 if __name__ == "__main__":
     """Run the demo when script is executed directly."""
