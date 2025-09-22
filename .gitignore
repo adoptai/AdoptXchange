@@ -141,3 +141,4 @@ poetry.lock
 # OS
 .DS_Store
 Thumbs.db
+examples/test_adopt_profile.json
