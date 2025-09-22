@@ -215,7 +215,7 @@ def run_list_actions_message(profile: Dict[str, Any]) -> str:
         raise ValueError(f"API returned unsuccessful status: {json_response}")
     action_message = AIMessage(**json_response["ai_message"])
     if not isinstance(action_message.content, list): # pyright: ignore
-        raise ValueError(f"Action message content is not a string. It is: {type(action_message.content)}") # pyright: ignore
+        raise ValueError(f"Action message content is not a list. It is: {type(action_message.content)}") # pyright: ignore
     return str(action_message.content) # pyright: ignore
 
 def run_action(command: str, profile: Dict[str, Any]) -> str:
@@ -271,24 +271,28 @@ def run_action(command: str, profile: Dict[str, Any]) -> str:
     # Check for expected content in response (these are specific to the test action)
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, list): # pyright: ignore
-        raise ValueError(f"Action message content is not a string. It is: {type(ai_message.content)}") # pyright: ignore
+        raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
     return str(ai_message.content) # pyright: ignore
 
-if __name__ == "__main__":
-    """Run the demo when script is executed directly."""
-
+def main():
+    """Main entry point for the Adopt Action API Samples."""
     # let's parse the command line arguments
     parser = argparse.ArgumentParser(description="Adopt Action API Samples")
     parser.add_argument("--sync", action="store_true", help="Sync adopt actions")
     parser.add_argument("--get-list", action="store_true", help="List adopt actions")
     parser.add_argument("--list", action="store_true", help="List adopt actions via message")
-    parser.add_argument("--run", action="store_true", help="Run adopt action")
-    parser.add_argument("--command", type=str, help="Command to run")
-    parser.add_argument("--profile", type=str, required=True, help="Path to the adopt profile JSON file")
+    parser.add_argument("--run", type=str, help="Run adopt action with the specified command")
+    parser.add_argument("--profile", type=str, help="Path to the adopt profile JSON file (required for --list and --run commands)")
     args = parser.parse_args()
     # Check if no arguments are provided or if invalid combination of arguments
     if not any([args.sync, args.get_list, args.list, args.run]):
         print("Error: No action specified. Please provide one of the following options:")
+        parser.print_help()
+        exit(1)
+    
+    # Check if --profile is required for specific commands
+    if (args.list or args.run) and not args.profile:
+        print("Error: --profile is required for --list and --run commands")
         parser.print_help()
         exit(1)
 
@@ -305,10 +309,12 @@ if __name__ == "__main__":
         print(message)
         exit(0)
     if args.run:
-        if not args.command:
-            print("Error: --command is required when using --run")
-            exit(1)
         profile = load_adopt_profile_from_path(args.profile)
-        message = run_action(args.command, profile)
+        message = run_action(args.run, profile)
         print(message)
         exit(0)
+
+
+if __name__ == "__main__":
+    """Run the demo when script is executed directly."""
+    main()
