@@ -14,19 +14,24 @@ This project requires several environment variables to be configured. A comprehe
 
 2. Edit `.env` and fill in your actual values for the required variables.
 
-3. Install dependencies (if any):
+3. Install dependencies using Poetry:
    ```bash
-   pip install -r requirements.txt
+   poetry install
    ```
 
 ## Usage
 
-The main functionality is demonstrated in `examples/action-api-samples/sample.py`, which provides a command-line interface for interacting with the Adopt API.
+The main functionality is demonstrated in `examples/action-api-samples/api_sample.py`, which provides a command-line interface for interacting with the Adopt API.
 
 ### Command Line Options
 
 ```bash
-python examples/action-api-samples/sample.py [OPTIONS]
+# Using Poetry (recommended)
+poetry run python examples/action-api-samples/api_sample.py [OPTIONS]
+
+# Or activate the virtual environment first
+poetry shell
+python examples/action-api-samples/api_sample.py [OPTIONS]
 ```
 
 Available options:
@@ -40,22 +45,22 @@ Available options:
 
 1. **Sync actions with the training pipeline:**
    ```bash
-   python examples/action-api-samples/sample.py --sync
+   poetry run python examples/action-api-samples/api_sample.py --sync
    ```
 
 2. **List all available actions:**
    ```bash
-   python examples/action-api-samples/sample.py --get-list
+   poetry run python examples/action-api-samples/api_sample.py --get-list
    ```
 
 3. **List actions using natural language:**
    ```bash
-   python examples/action-api-samples/sample.py --list
+   poetry run python examples/action-api-samples/api_sample.py --list
    ```
 
 4. **Run a specific action:**
    ```bash
-   python examples/action-api-samples/sample.py --run --command "Create a segment named 'Test Segment'"
+   poetry run python examples/action-api-samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
    ```
 
 ### Available Functions
@@ -82,6 +87,51 @@ You'll need to configure all the variables in the `dev.env` file:
 - `ADOPT_CLIENT_ID`: Your Adopt API client ID
 - `ADOPT_CLIENT_SECRET`: Your Adopt API client secret
 - `ADOPT_API_ENDPOINT`: The Adopt API endpoint URL
+
+## Development
+
+This project uses Poetry for dependency management and virtual environment handling.
+
+### Poetry Commands
+
+```bash
+# Install dependencies
+poetry install
+
+# Add a new dependency
+poetry add package-name
+
+# Add a development dependency
+poetry add --group dev package-name
+
+# Activate the virtual environment
+poetry shell
+
+# Run commands in the virtual environment
+poetry run python script.py
+
+# Update dependencies
+poetry update
+
+# Show dependency tree
+poetry show --tree
+```
+
+### Development Dependencies
+
+The project includes several development tools:
+- `pytest` - Testing framework
+- `black` - Code formatter
+- `flake8` - Linting
+- `mypy` - Type checking
+
+Run them with:
+```bash
+poetry run pytest
+poetry run black .
+poetry run flake8
+poetry run mypy .
+```
 
 ### Security Note
 

@@ -1,10 +1,11 @@
 """Module to demonstrate the use of the Adopt action API"""
 
-import os
+import argparse
+import re
 import requests
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from examples import read_env, AdoptEnv
-from models import AdoptActionListResponse, AdoptAction, AdoptActionRunRequest, AdoptActionRunResponse
+from examples.models import AdoptActionListResponse, AdoptActionRunRequest
 
 def get_adopt_env() -> AdoptEnv:
     """Get the Adopt environment variables."""
@@ -12,7 +13,6 @@ def get_adopt_env() -> AdoptEnv:
 
 def sync_adopt_actions() -> None:
     """Syncing actions with the training pipeline if running on prem."""
-    
     try:
         # Get environment variables
         adopt_env = get_adopt_env()
@@ -85,10 +85,19 @@ def list_actions() -> AdoptActionListResponse:
         'secret': adopt_env.ADOPT_CLIENT_SECRET,
     })
     assert auth_response.status_code == 200
-    auth_token_response = AuthTokenResponse(**auth_response.json())
+    # Extract access token from response
+    auth_data = auth_response.json()
+    access_token = auth_data.get('access_token')
+    
+    if not access_token:
+        print("No access token received from authentication response")
+        print(f"Response: {auth_data}")
+        raise ValueError("No access token received from authentication response")
+
+    print("Successfully authenticated with Adopt API")
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/list"
     headers = {
-        "Authorization": f"Bearer {auth_token_response.access_token}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
     response = requests.post(url, headers=headers)
@@ -102,14 +111,26 @@ def list_actions() -> AdoptActionListResponse:
 
 def run_list_actions_message() -> str:
     """Running a list actions meta message via APIs."""
+    adopt_env = get_adopt_env()
 
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
-    auth_response = requests.post(url, json=get_auth_request.model_dump())
+    auth_response = requests.post(url, json={
+        'clientId': adopt_env.ADOPT_CLIENT_ID,
+        'secret': adopt_env.ADOPT_CLIENT_SECRET,
+    })
     assert auth_response.status_code == 200
-    auth_token_response = AuthTokenResponse(**auth_response.json())
+    auth_data = auth_response.json()
+    access_token = auth_data.get('access_token')
+        
+    if not access_token:
+        print("No access token received from authentication response")
+        print(f"Response: {auth_data}")
+        raise ValueError("No access token received from authentication response")
+        
+    print("Successfully authenticated with Adopt API")
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
-        "Authorization": f"Bearer {auth_token_response.access_token}"
+        "Authorization": f"Bearer {access_token}"
     }
     action_request = AdoptActionRunRequest(
         messages=[
@@ -123,7 +144,9 @@ def run_list_actions_message() -> str:
     print(json_response)
     assert json_response["status"] == True
     action_message = AIMessage(**json_response["ai_message"])
-    return action_message.content
+    if not isinstance(action_message.content, str): # pyright: ignore
+        raise ValueError("Action message content is not a string")
+    return str(action_message.content)
 
 def run_action(command: str) -> str:
     """Test running a specific action via langchain adapter."""
@@ -131,12 +154,23 @@ def run_action(command: str) -> str:
 
     # now let's hit the auth API with the PAT to get a bearer token
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
-    auth_response = requests.post(url, json=get_auth_request.model_dump())
+    auth_response = requests.post(url, json={
+        'clientId': adopt_env.ADOPT_CLIENT_ID,
+        'secret': adopt_env.ADOPT_CLIENT_SECRET,
+    })
     assert auth_response.status_code == 200
-    auth_token_response = AuthTokenResponse(**auth_response.json())
+    auth_data = auth_response.json()
+    access_token = auth_data.get('access_token')
+        
+    if not access_token:
+        print("No access token received from authentication response")
+        print(f"Response: {auth_data}")
+        raise ValueError("No access token received from authentication response")
+        
+    print("Successfully authenticated with Adopt API")
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
-        "Authorization": f"Bearer {auth_token_response.access_token}"
+        "Authorization": f"Bearer {access_token}"
     }
     action_request = AdoptActionRunRequest(
         messages=[
@@ -158,6 +192,10 @@ def run_action(command: str) -> str:
     assert "This is a test segment" in json_response["response"]
     assert re.search(r"Industry:\s*Technology", json_response["response"])
     assert re.search(r"Employee Count:\s*100-500", json_response["response"])
+    ai_message = AIMessage(**json_response["ai_message"])
+    if not isinstance(ai_message.content, str): # pyright: ignore
+        raise ValueError("Action message content is not a string")
+    return str(ai_message.content)
 
 if __name__ == "__main__":
     """Run the demo when script is executed directly."""
@@ -183,6 +221,9 @@ if __name__ == "__main__":
         print(message)
         exit(0)
     if args.run:
-        message = run_action()
+        if not args.command:
+            print("Error: --command is required when using --run")
+            exit(1)
+        message = run_action(args.command)
         print(message)
         exit(0)

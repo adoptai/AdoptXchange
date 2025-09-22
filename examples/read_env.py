@@ -16,5 +16,3 @@ def read_env() -> AdoptEnv:
     if adopt_env.ADOPT_CLIENT_ID is None or adopt_env.ADOPT_CLIENT_SECRET is None:
         raise ValueError("ADOPT_CLIENT_ID and ADOPT_CLIENT_SECRET are required")
     return adopt_env
-
-read_env()

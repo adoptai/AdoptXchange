@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "adoptxchange"
+version = "0.1.0"
+description = "Methods and examples to connect external agents to interact with agents built on the AdoptAI platform"
+authors = ["AdoptXchange Team"]
+readme = "README.md"
+packages = [{include = "examples"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31.0"
+langchain-core = "^0.1.0"
+pydantic = "^2.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0.0"
+black = "^23.0.0"
+flake8 = "^6.0.0"
+mypy = "^1.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+adoptxchange = "examples.action-api-samples.api_sample:main"
