@@ -45,22 +45,22 @@ Available options:
 
 1. **Sync actions with the training pipeline:**
    ```bash
-   poetry run python examples/action-api-samples/api_sample.py --sync
+   source dev.env && poetry run python examples/action-api-samples/api_sample.py --sync
    ```
 
 2. **List all available actions:**
    ```bash
-   poetry run python examples/action-api-samples/api_sample.py --get-list
+   source dev.env && poetry run python examples/action-api-samples/api_sample.py --get-list
    ```
 
 3. **List actions using natural language:**
    ```bash
-   poetry run python examples/action-api-samples/api_sample.py --list
+   source dev.env && poetry run python examples/action-api-samples/api_sample.py --list
    ```
 
 4. **Run a specific action:**
    ```bash
-   poetry run python examples/action-api-samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
+   source dev.env && poetry run python examples/action-api-samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
    ```
 
 ### Available Functions
@@ -71,6 +71,40 @@ The sample script provides several functions for interacting with the Adopt API:
 - **`list_actions()`**: Retrieves and returns a list of all available actions
 - **`run_list_actions_message()`**: Uses natural language to request a list of actions
 - **`run_action(command)`**: Executes a specific action based on the provided command
+
+### Configuration Files
+
+#### adopt_profile.json
+
+The `examples/adopt_profile.json` file contains the configuration settings that are passed to Adopt when running actions. This file is essential for ensuring that the right settings are used when executing messages through the Adopt API.
+
+**File Structure:**
+```json
+{
+    "base_url": "https://test6sense.abm.6sense.com",
+    "application_base_url": "https://test6sense.abm.6sense.com", 
+    "workflow_params": {},
+    "security_params": {
+        "cookie": ""
+    }
+}
+```
+
+**Configuration Parameters:**
+
+- `base_url`: The base URL for the target platform/application that Adopt will interact with
+- `application_base_url`: The application-specific base URL for the platform
+- `workflow_params`: Additional workflow-specific parameters (typically empty object `{}`)
+- `security_params`: Security-related parameters including authentication cookies
+  - `cookie`: Authentication cookie value for the target platform (leave empty if not needed)
+
+**Usage:**
+This profile is automatically loaded when running actions through the API sample script. The settings in this file are passed to the Adopt API to ensure that actions are executed with the correct platform context and security credentials.
+
+**Important Notes:**
+- Update the `base_url` and `application_base_url` to match your target platform
+- If your platform requires authentication cookies, add them to the `security_params.cookie` field
+- Keep this file secure as it may contain sensitive authentication information
 
 ### Environment Variables
 

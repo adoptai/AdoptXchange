@@ -1,0 +1,8 @@
+{
+    "base_url": "https://test6sense.abm.6sense.com",
+    "application_base_url": "https://test6sense.abm.6sense.com",
+    "workflow_params": {},
+    "security_params": {
+        "cookie": ""
+    }
+}

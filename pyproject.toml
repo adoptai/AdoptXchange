@@ -9,7 +9,7 @@ packages = [{include = "examples"}]
 [tool.poetry.dependencies]
 python = "^3.11"
 requests = "^2.31.0"
-langchain-core = "^0.1.0"
+langchain-core = "^0.3.76"
 pydantic = "^2.0.0"
 
 [tool.poetry.group.dev.dependencies]

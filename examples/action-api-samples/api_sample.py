@@ -1,8 +1,11 @@
 """Module to demonstrate the use of the Adopt action API"""
 
 import argparse
+import json
+import os
 import re
 import requests
+from typing import Any, Dict
 from langchain_core.messages import HumanMessage, AIMessage
 from examples import read_env, AdoptEnv
 from examples.models import AdoptActionListResponse, AdoptActionRunRequest
@@ -10,6 +13,34 @@ from examples.models import AdoptActionListResponse, AdoptActionRunRequest
 def get_adopt_env() -> AdoptEnv:
     """Get the Adopt environment variables."""
     return read_env()
+
+def load_adopt_profile() -> Dict[str, Any]:
+    """Load the adopt profile configuration from adopt_profile.json."""
+    # Get the directory of this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Navigate to the examples directory and find adopt_profile.json
+    examples_dir = os.path.dirname(script_dir)
+    profile_path = os.path.join(examples_dir, "adopt_profile.json")
+    
+    try:
+        with open(profile_path, 'r') as f:
+            profile = json.load(f)
+        print(f"Loaded adopt profile from: {profile_path}")
+        return profile
+    except FileNotFoundError:
+        print(f"Warning: adopt_profile.json not found at {profile_path}")
+        print("Using default profile settings")
+        return {
+            "base_url": "",
+            "application_base_url": "",
+            "workflow_params": {},
+            "security_params": {
+                "cookie": ""
+            }
+        }
+    except json.JSONDecodeError as e:
+        print(f"Error parsing adopt_profile.json: {e}")
+        raise ValueError(f"Invalid JSON in adopt_profile.json: {e}")
 
 def sync_adopt_actions() -> None:
     """Syncing actions with the training pipeline if running on prem."""
@@ -26,7 +57,7 @@ def sync_adopt_actions() -> None:
         }
 
         print(f"Authenticating with Adopt API at: {auth_url}")
-        auth_response = requests.post(auth_url, data=auth_payload)
+        auth_response = requests.post(auth_url, json=auth_payload)
         
         if auth_response.status_code != 200:
             print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
@@ -84,7 +115,11 @@ def list_actions() -> AdoptActionListResponse:
         'clientId': adopt_env.ADOPT_CLIENT_ID,
         'secret': adopt_env.ADOPT_CLIENT_SECRET,
     })
-    assert auth_response.status_code == 200
+    if auth_response.status_code != 200:
+        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
+        print(f"Response: {auth_response.text}")
+        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
+    
     # Extract access token from response
     auth_data = auth_response.json()
     access_token = auth_data.get('access_token')
@@ -100,13 +135,22 @@ def list_actions() -> AdoptActionListResponse:
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    response = requests.post(url, headers=headers)
-    assert response.status_code == 200
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code != 200:
+        print(f"Failed to list actions. Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+        raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
+    
     json_response = response.json()
     print(json_response)
-    assert "capabilities" in json_response
-    assert isinstance(json_response["capabilities"], list)
-    assert len(json_response["capabilities"]) > 0
+    
+    if "capabilities" not in json_response:
+        raise ValueError(f"Expected 'capabilities' in response, got: {json_response}")
+    if not isinstance(json_response["capabilities"], list):
+        raise ValueError(f"Expected 'capabilities' to be a list, got: {type(json_response['capabilities'])}")
+    if len(json_response["capabilities"]) == 0:
+        print("Warning: No capabilities found in response")
     return AdoptActionListResponse(**json_response)
 
 def run_list_actions_message() -> str:
@@ -118,7 +162,11 @@ def run_list_actions_message() -> str:
         'clientId': adopt_env.ADOPT_CLIENT_ID,
         'secret': adopt_env.ADOPT_CLIENT_SECRET,
     })
-    assert auth_response.status_code == 200
+    if auth_response.status_code != 200:
+        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
+        print(f"Response: {auth_response.text}")
+        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
+    
     auth_data = auth_response.json()
     access_token = auth_data.get('access_token')
         
@@ -139,10 +187,18 @@ def run_list_actions_message() -> str:
     )
     response = requests.post(url, headers=headers,
         json=action_request.model_dump())
-    assert response.status_code == 200
+    
+    if response.status_code != 200:
+        print(f"Failed to run list actions message. Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+        raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
+    
     json_response = response.json()
     print(json_response)
-    assert json_response["status"] == True
+    
+    if json_response.get("status") != True:
+        print(f"API returned unsuccessful status: {json_response}")
+        raise ValueError(f"API returned unsuccessful status: {json_response}")
     action_message = AIMessage(**json_response["ai_message"])
     if not isinstance(action_message.content, str): # pyright: ignore
         raise ValueError("Action message content is not a string")
@@ -151,6 +207,7 @@ def run_list_actions_message() -> str:
 def run_action(command: str) -> str:
     """Test running a specific action via langchain adapter."""
     adopt_env = get_adopt_env()
+    adopt_profile = load_adopt_profile()
 
     # now let's hit the auth API with the PAT to get a bearer token
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
@@ -158,7 +215,11 @@ def run_action(command: str) -> str:
         'clientId': adopt_env.ADOPT_CLIENT_ID,
         'secret': adopt_env.ADOPT_CLIENT_SECRET,
     })
-    assert auth_response.status_code == 200
+    if auth_response.status_code != 200:
+        print(f"Failed to authenticate with Adopt API. Status code: {auth_response.status_code}")
+        print(f"Response: {auth_response.text}")
+        raise ValueError(f"Authentication failed with status code {auth_response.status_code}: {auth_response.text}")
+    
     auth_data = auth_response.json()
     access_token = auth_data.get('access_token')
         
@@ -176,22 +237,35 @@ def run_action(command: str) -> str:
         messages=[
             HumanMessage(content=command)
         ],
-        base_url="https://test6sense.abm.6sense.com",
-        application_base_url="https://test6sense.abm.6sense.com",
-        workflow_params={},
-        security_params={
-            "cookie": ""
-        }
+        base_url=adopt_profile.get("base_url", ""),
+        application_base_url=adopt_profile.get("application_base_url", ""),
+        workflow_params=adopt_profile.get("workflow_params", {}),
+        security_params=adopt_profile.get("security_params", {})
     )
     response = requests.post(url, headers=headers, json=action_request.model_dump())
-    assert response.status_code == 200
+    
+    if response.status_code != 200:
+        print(f"Failed to run action. Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+        raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
+    
     json_response = response.json()
     print(json_response)
-    assert json_response["status"] == True
-    assert "Test Segment" in json_response["response"]
-    assert "This is a test segment" in json_response["response"]
-    assert re.search(r"Industry:\s*Technology", json_response["response"])
-    assert re.search(r"Employee Count:\s*100-500", json_response["response"])
+    
+    if json_response.get("status") != True:
+        print(f"API returned unsuccessful status: {json_response}")
+        raise ValueError(f"API returned unsuccessful status: {json_response}")
+    
+    # Check for expected content in response (these are specific to the test action)
+    response_text = json_response.get("response", "")
+    if "Test Segment" not in response_text:
+        print(f"Warning: Expected 'Test Segment' not found in response: {response_text}")
+    if "This is a test segment" not in response_text:
+        print(f"Warning: Expected 'This is a test segment' not found in response: {response_text}")
+    if not re.search(r"Industry:\s*Technology", response_text):
+        print(f"Warning: Expected 'Industry: Technology' pattern not found in response: {response_text}")
+    if not re.search(r"Employee Count:\s*100-500", response_text):
+        print(f"Warning: Expected 'Employee Count: 100-500' pattern not found in response: {response_text}")
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, str): # pyright: ignore
         raise ValueError("Action message content is not a string")
@@ -208,7 +282,12 @@ if __name__ == "__main__":
     parser.add_argument("--run", action="store_true", help="Run adopt action")
     parser.add_argument("--command", type=str, help="Command to run")
     args = parser.parse_args()
-    
+    # Check if no arguments are provided or if invalid combination of arguments
+    if not any([args.sync, args.get_list, args.list, args.run]):
+        print("Error: No action specified. Please provide one of the following options:")
+        parser.print_help()
+        exit(1)
+
     if args.sync:
         sync_adopt_actions()
         exit(0)
