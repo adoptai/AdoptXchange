@@ -42,6 +42,20 @@ def load_adopt_profile() -> Dict[str, Any]:
         print(f"Error parsing adopt_profile.json: {e}")
         raise ValueError(f"Invalid JSON in adopt_profile.json: {e}")
 
+def load_adopt_profile_from_path(profile_path: str) -> Dict[str, Any]:
+    """Load the adopt profile configuration from a specified path."""
+    try:
+        with open(profile_path, 'r') as f:
+            profile = json.load(f)
+        print(f"Loaded adopt profile from: {profile_path}")
+        return profile
+    except FileNotFoundError:
+        print(f"Error: Profile file not found at {profile_path}")
+        raise ValueError(f"Profile file not found at {profile_path}")
+    except json.JSONDecodeError as e:
+        print(f"Error parsing profile file: {e}")
+        raise ValueError(f"Invalid JSON in profile file: {e}")
+
 def sync_adopt_actions() -> None:
     """Syncing actions with the training pipeline if running on prem."""
     try:
@@ -153,7 +167,7 @@ def list_actions() -> AdoptActionListResponse:
         print("Warning: No capabilities found in response")
     return AdoptActionListResponse(**json_response)
 
-def run_list_actions_message() -> str:
+def run_list_actions_message(profile: Dict[str, Any]) -> str:
     """Running a list actions meta message via APIs."""
     adopt_env = get_adopt_env()
 
@@ -184,6 +198,10 @@ def run_list_actions_message() -> str:
         messages=[
             HumanMessage(content="List all actions")
         ],
+        base_url=profile.get("base_url", ""),
+        application_base_url=profile.get("application_base_url", ""),
+        workflow_params=profile.get("workflow_params", {}),
+        security_params=profile.get("security_params", {})
     )
     response = requests.post(url, headers=headers,
         json=action_request.model_dump())
@@ -194,20 +212,17 @@ def run_list_actions_message() -> str:
         raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
     
     json_response = response.json()
-    print(json_response)
-    
     if json_response.get("status") != True:
         print(f"API returned unsuccessful status: {json_response}")
         raise ValueError(f"API returned unsuccessful status: {json_response}")
     action_message = AIMessage(**json_response["ai_message"])
-    if not isinstance(action_message.content, str): # pyright: ignore
-        raise ValueError("Action message content is not a string")
-    return str(action_message.content)
+    if not isinstance(action_message.content, list): # pyright: ignore
+        raise ValueError(f"Action message content is not a string. It is: {type(action_message.content)}") # pyright: ignore
+    return str(action_message.content) # pyright: ignore
 
-def run_action(command: str) -> str:
+def run_action(command: str, profile: Dict[str, Any]) -> str:
     """Test running a specific action via langchain adapter."""
     adopt_env = get_adopt_env()
-    adopt_profile = load_adopt_profile()
 
     # now let's hit the auth API with the PAT to get a bearer token
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/auth/token"
@@ -237,10 +252,10 @@ def run_action(command: str) -> str:
         messages=[
             HumanMessage(content=command)
         ],
-        base_url=adopt_profile.get("base_url", ""),
-        application_base_url=adopt_profile.get("application_base_url", ""),
-        workflow_params=adopt_profile.get("workflow_params", {}),
-        security_params=adopt_profile.get("security_params", {})
+        base_url=profile.get("base_url", ""),
+        application_base_url=profile.get("application_base_url", ""),
+        workflow_params=profile.get("workflow_params", {}),
+        security_params=profile.get("security_params", {})
     )
     response = requests.post(url, headers=headers, json=action_request.model_dump())
     
@@ -268,7 +283,7 @@ def run_action(command: str) -> str:
         print(f"Warning: Expected 'Employee Count: 100-500' pattern not found in response: {response_text}")
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, str): # pyright: ignore
-        raise ValueError("Action message content is not a string")
+        raise ValueError(f"Action message content is not a string. It is: {type(ai_message.content)}") # pyright: ignore
     return str(ai_message.content)
 
 if __name__ == "__main__":
@@ -281,6 +296,7 @@ if __name__ == "__main__":
     parser.add_argument("--list", action="store_true", help="List adopt actions via message")
     parser.add_argument("--run", action="store_true", help="Run adopt action")
     parser.add_argument("--command", type=str, help="Command to run")
+    parser.add_argument("--profile", type=str, required=True, help="Path to the adopt profile JSON file")
     args = parser.parse_args()
     # Check if no arguments are provided or if invalid combination of arguments
     if not any([args.sync, args.get_list, args.list, args.run]):
@@ -296,13 +312,15 @@ if __name__ == "__main__":
         print(action_list)
         exit(0)
     if args.list:
-        message = run_list_actions_message()
+        profile = load_adopt_profile_from_path(args.profile)
+        message = run_list_actions_message(profile)
         print(message)
         exit(0)
     if args.run:
         if not args.command:
             print("Error: --command is required when using --run")
             exit(1)
-        message = run_action(args.command)
+        profile = load_adopt_profile_from_path(args.profile)
+        message = run_action(args.command, profile)
         print(message)
         exit(0)
