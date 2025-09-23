@@ -1,5 +1,5 @@
 # AdoptXchange
-Methods and examples to connect external agents to interact with agents built on the AdoptAI platform.
+Methods and examples to connect external agents to interact with agents built on the [Adopt AI platform](https://www.adopt.ai).
 
 ## Environment Setup
 
