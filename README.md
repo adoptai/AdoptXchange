@@ -138,6 +138,28 @@ The sample script provides several functions for interacting with the Adopt API:
 
 #### adopt_profile.json
 
+**TODO: Create your `adopt_profile.json` file**
+
+Before using the Adopt API, you need to create the `examples/adopt_profile.json` file with your platform-specific configuration. This file contains the configuration settings that are passed to Adopt when running actions and is essential for ensuring that the right settings are used when executing messages through the Adopt API.
+
+**Required Steps:**
+
+1. Copy the template file:
+   ```bash
+   cp examples/adopt_profile.json examples/my_adopt_profile.json
+   ```
+
+2. Update the configuration with your platform details:
+   - Set `base_url` and `application_base_url` to your target platform's URLs
+   - Configure `security_params` with the necessary headers and authentication tokens that your platform's browser-facing APIs require
+
+3. **Important**: The `security_params` section should include all the headers typically needed for calling your platform's browser-facing APIs, such as:
+   - Authentication cookies
+   - Authorization headers
+   - CSRF tokens
+   - Session IDs
+   - Any other platform-specific authentication parameters
+
 The `examples/adopt_profile.json` file contains the configuration settings that are passed to Adopt when running actions. This file is essential for ensuring that the right settings are used when executing messages through the Adopt API.
 
 **File Structure:**
@@ -191,6 +213,18 @@ You'll need to configure all the variables in the `dev.env` file:
 - `ADOPT_CLIENT_ID`: Your Adopt API client ID
 - `ADOPT_CLIENT_SECRET`: Your Adopt API client secret
 - `ADOPT_API_ENDPOINT`: The Adopt API endpoint URL
+
+**Getting Your Adopt API Credentials:**
+
+To obtain your `ADOPT_CLIENT_ID` and `ADOPT_CLIENT_SECRET`, follow these steps from the [Adopt AI External API documentation](https://docs.adopt.ai/api-reference/external-api):
+
+1. Go to the **Adopt Platform**
+2. Navigate to `Settings → Profile → Personal Tokens`
+3. Click **"Generate Token"**
+4. Copy the `clientId` and `secret` values
+5. Use these values in your `.env` file as `ADOPT_CLIENT_ID` and `ADOPT_CLIENT_SECRET`
+
+> 💡 You can manage and revoke tokens from the same page at any time.
 
 #### For LangGraph Agent (Additional):
 - `AWS_ACCESS_KEY_ID`: Your AWS Access Key ID
