@@ -4,8 +4,8 @@ import argparse
 import json
 import os
 import requests
-from typing import Any, Dict
-from langchain_core.messages import HumanMessage, AIMessage
+from typing import Any, Dict, Sequence
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from examples import read_env, AdoptEnv
 from examples.models import AdoptActionListResponse, AdoptActionRunRequest
 
@@ -192,7 +192,7 @@ def run_list_actions_message(profile: Dict[str, Any]) -> str:
         raise ValueError(f"Action message content is not a list. It is: {type(action_message.content)}") # pyright: ignore
     return str(action_message.content) # pyright: ignore
 
-def run_action(command: str, profile: Dict[str, Any]) -> str:
+def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any]) -> str:
     """Test running a specific action via langchain adapter."""
     adopt_env = get_adopt_env()
 
@@ -204,9 +204,7 @@ def run_action(command: str, profile: Dict[str, Any]) -> str:
         "Authorization": f"Bearer {access_token}"
     }
     action_request = AdoptActionRunRequest(
-        messages=[
-            HumanMessage(content=command)
-        ],
+        messages=list(messages),
         base_url=profile.get("base_url", ""),
         application_base_url=profile.get("application_base_url", ""),
         workflow_params=profile.get("workflow_params", {}),
@@ -267,7 +265,8 @@ def main():
         exit(0)
     if args.run:
         profile = load_adopt_profile_from_path(args.profile)
-        message = run_action(args.run, profile)
+        messages = [HumanMessage(content=args.run)]
+        message = run_action(messages, profile)
         print(message)
         exit(0)
 

@@ -19,19 +19,26 @@ This project requires several environment variables to be configured. A comprehe
    poetry install
    ```
 
+   **Note**: The project now includes additional dependencies for the LangGraph agent:
+   - `langchain-aws`: For AWS Bedrock Converse integration
+   - `langgraph`: For building the intelligent agent workflow
+
 ## Usage
 
-The main functionality is demonstrated in `examples/action-api-samples/api_sample.py`, which provides a command-line interface for interacting with the Adopt API.
+The main functionality is demonstrated in two ways:
+
+1. **Direct API Usage**: `examples/action_api_samples/api_sample.py` provides a command-line interface for interacting with the Adopt API.
+2. **LangGraph Agent**: `examples/langgraph_samples/langgraph_sample.py` provides an intelligent agent that automatically determines if Adopt can handle requests and executes them accordingly.
 
 ### Command Line Options
 
 ```bash
 # Using Poetry (recommended)
-poetry run python examples/action-api-samples/api_sample.py [OPTIONS]
+poetry run python examples/action_api_samples/api_sample.py [OPTIONS]
 
 # Or activate the virtual environment first
 poetry shell
-python examples/action-api-samples/api_sample.py [OPTIONS]
+python examples/action_api_samples/api_sample.py [OPTIONS]
 ```
 
 Available options:
@@ -45,23 +52,78 @@ Available options:
 
 1. **Sync actions with the training pipeline:**
    ```bash
-   source dev.env && poetry run python examples/action-api-samples/api_sample.py --sync
+   source dev.env && poetry run python examples/action_api_samples/api_sample.py --sync
    ```
 
 2. **List all available actions:**
    ```bash
-   source dev.env && poetry run python examples/action-api-samples/api_sample.py --get-list
+   source dev.env && poetry run python examples/action_api_samples/api_sample.py --get-list
    ```
 
 3. **List actions using natural language:**
    ```bash
-   source dev.env && poetry run python examples/action-api-samples/api_sample.py --list
+   source dev.env && poetry run python examples/action_api_samples/api_sample.py --list
    ```
 
 4. **Run a specific action:**
    ```bash
-   source dev.env && poetry run python examples/action-api-samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
+   source dev.env && poetry run python examples/action_api_samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
    ```
+
+### LangGraph Agent
+
+The LangGraph agent (`examples/langgraph_samples/langgraph_sample.py`) provides an intelligent way to interact with Adopt capabilities:
+
+#### Features
+
+- **Automatic Capability Checking**: Uses AWS Bedrock Converse to determine if Adopt can handle a user's request
+- **Smart Routing**: Only executes actions when Adopt can actually fulfill the request
+- **Conversation Context**: Maintains message history for better context understanding
+- **Error Handling**: Gracefully handles errors and provides meaningful feedback
+
+#### How It Works
+
+The agent has two main nodes:
+
+1. **Capability Checker**: 
+   - Retrieves available Adopt capabilities using `get_list()`
+   - Uses AWS Bedrock Converse (Claude) to analyze if the user's request can be handled
+   - Returns a boolean decision on whether to proceed
+
+2. **Action Runner**:
+   - If the request can be handled, executes it using `run_action()`
+   - Passes the entire message history for context
+   - Returns the Adopt API response
+
+#### Usage Example
+
+```python
+from examples.langgraph_samples.langgraph_sample import create_adopt_agent
+from langchain_core.messages import HumanMessage
+
+# Create the agent
+agent = create_adopt_agent("examples/adopt_profile.json")
+
+# Run a conversation
+result = agent.invoke({
+    "messages": [HumanMessage(content="Create a new segment called 'Test Segment'")],
+    "adopt_capabilities": "",
+    "can_handle_request": False,
+    "adopt_profile": agent.adopt_profile
+})
+
+print(result["messages"][-1].content)
+```
+
+#### Running the Example
+
+```bash
+# Set up environment variables
+source dev.env
+
+# Run the LangGraph agent example
+poetry run python examples/langgraph_samples/langgraph_sample.py
+```
 
 ### Available Functions
 
@@ -115,12 +177,26 @@ The `dev.env` file contains the following configuration:
 - `ADOPT_CLIENT_SECRET`: Client secret for Adopt API authentication  
 - `ADOPT_API_ENDPOINT`: Endpoint where Adopt is running (https://connect.adopt.ai by default. Point it to your onprem endpoint if appropriate)
 
+#### AWS Bedrock Configuration (Required for LangGraph Agent)
+- `AWS_ACCESS_KEY_ID`: AWS Access Key ID for Bedrock authentication
+- `AWS_SECRET_ACCESS_KEY`: AWS Secret Access Key for Bedrock authentication
+- `AWS_REGION`: AWS Region where Bedrock is available (default: us-east-1)
+- `BEDROCK_MODEL`: Bedrock Converse model to use for capability checking (default: anthropic.claude-3-sonnet-20240229-v1:0)
+
 ### Required Variables
 
 You'll need to configure all the variables in the `dev.env` file:
+
+#### For Direct API Usage:
 - `ADOPT_CLIENT_ID`: Your Adopt API client ID
 - `ADOPT_CLIENT_SECRET`: Your Adopt API client secret
 - `ADOPT_API_ENDPOINT`: The Adopt API endpoint URL
+
+#### For LangGraph Agent (Additional):
+- `AWS_ACCESS_KEY_ID`: Your AWS Access Key ID
+- `AWS_SECRET_ACCESS_KEY`: Your AWS Secret Access Key
+- `AWS_REGION`: AWS region where Bedrock is available
+- `BEDROCK_MODEL`: Bedrock model identifier
 
 ## Development
 
