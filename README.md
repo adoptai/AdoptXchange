@@ -132,7 +132,28 @@ The sample script provides several functions for interacting with the Adopt API:
 - **`sync_adopt_actions()`**: Authenticates with the Adopt API and syncs actions with the training pipeline
 - **`list_actions()`**: Retrieves and returns a list of all available actions
 - **`run_list_actions_message()`**: Uses natural language to request a list of actions
-- **`run_action(command)`**: Executes a specific action based on the provided command
+- **`run_action(messages, profile)`**: Executes a specific action based on the provided messages and profile
+- **`run_simple_action(command, profile)`**: Simple convenience function that takes just a command string and profile, creates a HumanMessage, and calls run_action
+
+#### Simple Action Example
+
+The `run_simple_action` function provides an easy way to execute actions with minimal setup:
+
+```python
+from examples.action_api_samples.api_sample import run_simple_action, load_adopt_profile
+
+# Load your profile configuration
+profile = load_adopt_profile()
+
+# Run a simple action
+result = run_simple_action("Create a segment named 'Test Segment'", profile)
+print(result)
+```
+
+This function automatically:
+1. Creates a `HumanMessage` from your command string
+2. Calls the `run_action` function with the message and profile
+3. Returns the response from the Adopt API
 
 ### Configuration Files
 

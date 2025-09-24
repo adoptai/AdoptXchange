@@ -229,6 +229,22 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
     return str(ai_message.content) # pyright: ignore
 
+def run_simple_action(command: str, profile: Dict[str, Any]) -> str:
+    """Simple function to run an action with just a command string.
+    
+    This is a convenience function that creates a HumanMessage from the command
+    and calls run_action with it.
+    
+    Args:
+        command: The command string to execute
+        profile: The adopt profile configuration
+        
+    Returns:
+        The response from the action execution
+    """
+    messages = [HumanMessage(content=command)]
+    return run_action(messages, profile)
+
 def main():
     """Main entry point for the Adopt Action API Samples."""
     # let's parse the command line arguments
