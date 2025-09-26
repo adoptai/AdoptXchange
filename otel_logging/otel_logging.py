@@ -224,7 +224,7 @@ class OpenTelemetryLogHandler(logging.Handler):
                 value_type = "stringValue" if isinstance(value, str) else "intValue" if isinstance(value, int) else "doubleValue" if isinstance(value, float) else "boolValue"
                 attributes.append({
                     "key": f"extra.{key}",
-                    "value": {value_type: str(value)}
+                    "value": {value_type: str(value) if isinstance(value, str) else value}
                 })
         
         # Add exception information if present
