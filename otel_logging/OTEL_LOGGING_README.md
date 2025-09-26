@@ -36,7 +36,7 @@ export OTEL_LOG_LEVEL="INFO"  # optional
 Then use in your code:
 
 ```python
-from utils.otel_logging import configure_from_environment, get_otel_logger
+from otel_logging.otel_logging import configure_from_environment, get_otel_logger
 
 # Configure from environment
 configure_from_environment()
@@ -49,7 +49,7 @@ logger.info("Hello OpenTelemetry!")
 ### 2. Programmatic Configuration
 
 ```python
-from utils.otel_logging import configure_otel_logging, get_otel_logger
+from otel_logging.otel_logging import configure_otel_logging, get_otel_logger
 
 # Configure OpenTelemetry logging
 configure_otel_logging(
@@ -69,7 +69,7 @@ logger.info("Application started", version="1.0.0")
 ### Basic Logging
 
 ```python
-from utils.otel_logging import get_otel_logger
+from otel_logging.otel_logging import get_otel_logger
 
 logger = get_otel_logger()
 
@@ -84,8 +84,7 @@ logger.critical("System failure", component="system")
 ### With Conversation Context
 
 ```python
-from utils.otel_logging import get_otel_logger
-from utils.context_manager import conversation_scope
+from otel_logging.otel_logging import get_otel_logger, conversation_scope
 
 logger = get_otel_logger()
 
@@ -207,7 +206,7 @@ The module includes robust error handling:
 Run the example file to test your configuration:
 
 ```bash
-python utils/otel_logging_example.py
+python otel_logging/otel_logging_example.py
 ```
 
 This will run through various logging scenarios and help verify your OpenTelemetry setup.
@@ -240,7 +239,7 @@ logging.getLogger("projecta3.otel").setLevel(logging.DEBUG)
 
 ## Examples
 
-See `utils/otel_logging_example.py` for comprehensive examples including:
+See `otel_logging/otel_logging_example.py` for comprehensive examples including:
 
 - Basic usage
 - Conversation context integration
@@ -253,7 +252,7 @@ See `utils/otel_logging_example.py` for comprehensive examples including:
 
 For issues or questions about this module, please check:
 
-1. The example file: `utils/otel_logging_example.py`
+1. The example file: `otel_logging/otel_logging_example.py`
 2. Your OpenTelemetry endpoint configuration
 3. Network connectivity and authentication
 4. Environment variable setup

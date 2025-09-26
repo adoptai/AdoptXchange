@@ -19,14 +19,14 @@ Environment Variables:
 
 import os
 import time
-from utils.otel_logging import (
+from otel_logging.otel_logging import (
     configure_otel_logging,
     get_otel_logger,
     configure_from_environment,
     is_otel_configured,
-    disable_otel_logging
+    disable_otel_logging,
+    conversation_scope
 )
-from utils.context_manager import conversation_scope
 
 
 def example_basic_usage():

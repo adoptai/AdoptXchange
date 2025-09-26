@@ -6,7 +6,7 @@ It integrates with the existing logging infrastructure and provides structured l
 to OpenTelemetry endpoints.
 
 Usage:
-    from utils.otel_logging import get_otel_logger, configure_otel_logging
+    from otel_logging.otel_logging import get_otel_logger, configure_otel_logging
     
     # Configure OpenTelemetry logging
     configure_otel_logging(
@@ -29,8 +29,26 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Import existing conversation context utilities
-from utils.context_manager import get_conversation_id, conversation_scope
+# Simple conversation context implementation
+import threading
+from contextlib import contextmanager
+
+# Thread-local storage for conversation context
+_context = threading.local()
+
+def get_conversation_id() -> Optional[str]:
+    """Get the current conversation ID from thread-local context."""
+    return getattr(_context, 'conversation_id', None)
+
+@contextmanager
+def conversation_scope(conversation_id: str):
+    """Context manager for setting conversation scope."""
+    old_id = getattr(_context, 'conversation_id', None)
+    _context.conversation_id = conversation_id
+    try:
+        yield
+    finally:
+        _context.conversation_id = old_id
 
 
 class OpenTelemetryLogHandler(logging.Handler):
