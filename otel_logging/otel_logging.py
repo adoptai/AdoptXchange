@@ -221,10 +221,24 @@ class OpenTelemetryLogHandler(logging.Handler):
         # Add any extra data as attributes
         for key, value in extra_data.items():
             if isinstance(value, (str, int, float, bool)):
-                value_type = "stringValue" if isinstance(value, str) else "intValue" if isinstance(value, int) else "doubleValue" if isinstance(value, float) else "boolValue"
+                if isinstance(value, str):
+                    value_type = "stringValue"
+                    attr_value = value
+                elif isinstance(value, int):
+                    value_type = "intValue"
+                    attr_value = str(value)
+                elif isinstance(value, float):
+                    value_type = "doubleValue"
+                    attr_value = str(value)
+                elif isinstance(value, bool):
+                    value_type = "boolValue"
+                    attr_value = str(value).lower()
+                else:
+                    continue
+                
                 attributes.append({
                     "key": f"extra.{key}",
-                    "value": {value_type: str(value) if isinstance(value, str) else value}
+                    "value": {value_type: attr_value}
                 })
         
         # Add exception information if present
