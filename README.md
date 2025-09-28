@@ -52,22 +52,22 @@ Available options:
 
 1. **Sync actions with the training pipeline:**
    ```bash
-   source dev.env && poetry run python examples/action_api_samples/api_sample.py --sync
+   poetry run python examples/action_api_samples/api_sample.py --sync
    ```
 
 2. **List all available actions:**
    ```bash
-   source dev.env && poetry run python examples/action_api_samples/api_sample.py --get-list
+   poetry run python examples/action_api_samples/api_sample.py --get-list
    ```
 
 3. **List actions using natural language:**
    ```bash
-   source dev.env && poetry run python examples/action_api_samples/api_sample.py --list
+   poetry run python examples/action_api_samples/api_sample.py --list --profile examples/adopt_profile.json
    ```
 
 4. **Run a specific action:**
    ```bash
-   source dev.env && poetry run python examples/action_api_samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
+   poetry run python examples/action_api_samples/api_sample.py --run "Create a segment named 'Test Segment'" --profile examples/adopt_profile.json
    ```
 
 ### LangGraph Agent
@@ -118,9 +118,6 @@ print(result["messages"][-1].content)
 #### Running the Example
 
 ```bash
-# Set up environment variables
-source dev.env
-
 # Run the LangGraph agent example
 poetry run python examples/langgraph_samples/langgraph_sample.py
 ```
@@ -300,4 +297,5 @@ poetry run mypy .
 
 ### Security Note
 
-The `dev.env` file is included in `.gitignore` to prevent sensitive information from being committed to version control. Always use environment variables for sensitive data like API keys and secrets.
+The `.env` file is included in `.gitignore` to prevent sensitive information from being committed to version control. Always use environment variables for sensitive data like API keys and secrets.
+
