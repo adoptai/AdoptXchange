@@ -1,8 +1,10 @@
-"""Module to read the environment variables from the dev.env file"""
+"""Module to read the environment variables from .env files"""
 
 import os
 from typing import Optional
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
 
 class AdoptEnv(BaseModel):
     """Class to read the environment variables from the dev.env file"""
@@ -13,9 +15,14 @@ class AdoptEnv(BaseModel):
     AWS_ACCESS_KEY_ID: Optional[str] = Field(default=None, description="AWS Access Key ID for Bedrock")
     AWS_REGION: Optional[str] = Field(default="us-east-1", description="AWS Region for Bedrock")
     BEDROCK_MODEL: Optional[str] = Field(default="us.anthropic.claude-4-sonnet-20250514-v1:0", description="Bedrock model to use")
+    MAXIM_API_KEY: Optional[str] = Field(default=None, description="Maxim API Key for evaluation platform")
+    MAXIM_WORKSPACE_ID: Optional[str] = Field(default=None, description="Maxim Workspace ID for storing evaluation results")
 
 def read_env() -> AdoptEnv:
-    """Read the environment variables from the dev.env file"""
+    """Read the environment variables from .env files"""
+    # Load environment variables from .env file (if not already loaded)
+    load_dotenv()
+    
     adopt_env = AdoptEnv(**os.environ)
     if adopt_env.ADOPT_CLIENT_ID is None or adopt_env.ADOPT_CLIENT_SECRET is None:
         raise ValueError("ADOPT_CLIENT_ID and ADOPT_CLIENT_SECRET are required")
