@@ -4,6 +4,7 @@
 import os
 import pandas as pd
 import json
+import ast
 import requests
 import argparse
 from typing import List, Any, Dict, Union
@@ -17,7 +18,7 @@ from langchain_core.messages import HumanMessage
 adopt_env = read_env()
 
 # Initialize Maxim SDK
-maxim = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
+maxim_client = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
 
 def filter_json_fields(data: Union[Dict, List, Any], exclude_fields: List[str]) -> Union[Dict, List, Any]:
     """
@@ -101,7 +102,6 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         response = run_simple_action(data["input"], profile, access_token)
 
         # Parse the response if it's a string representation of a list
-        import ast
         try:
             # Try to parse the response as a Python literal (list/dict)
             parsed_response = ast.literal_eval(response)
@@ -188,7 +188,7 @@ def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
         return None
 
 
-def save_results_to_csv( maxim_result):
+def save_results_to_csv(maxim_result):
     """Save evaluation results to CSV file"""
     import csv
     from datetime import datetime
@@ -346,7 +346,7 @@ Examples:
             return call_local_agent(data, profile, access_token, exclude_fields)
         
         result = (
-            maxim.create_test_run(
+            maxim_client.create_test_run(
                 name="Local Agent Endpoint Test", in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
             )
             .with_data_structure(

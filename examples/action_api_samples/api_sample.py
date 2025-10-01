@@ -215,7 +215,7 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         security_params=profile.get("security_params", {})
     )
     response = requests.post(url, headers=headers, json=action_request.model_dump())
-    print(f"Request payload: {response}")
+
     if response.status_code != 200:
         print(f"Failed to run action. Status code: {response.status_code}")
         print(f"Response: {response.text}")
