@@ -159,7 +159,7 @@ def save_results_to_csv(test_data, maxim_result, actual_outputs):
             writer.writeheader()
             writer.writerows(csv_data)
         
-        print(f"\\n{'='*50}")
+        print(f"\n{'='*50}")
         print("RESULTS SAVED TO CSV")
         print(f"{'='*50}")
         print(f"Results saved to: {csv_filename}")
