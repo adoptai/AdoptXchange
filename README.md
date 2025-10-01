@@ -155,6 +155,45 @@ This function automatically:
 2. Calls the `run_action` function with the message and profile
 3. Returns the response from the Adopt API
 
+### Bulk Evaluations
+
+The `evals` package provides bulk evaluation functionality using the Maxim SDK for comprehensive testing of AdoptXchange agents.
+
+#### Features
+
+- **CSV Input Support**: Load test cases from CSV files with `Input` and `Expected_output` columns
+- **Maxim Integration**: Automated evaluation using Maxim's evaluation platform
+- **Scalable Testing**: Run hundreds of test cases simultaneously
+- **Performance Metrics**: Detailed evaluation reports and analytics
+
+#### Quick Start
+
+1. **Prepare your test data CSV:**
+   ```csv
+   Input,Expected_output
+   What are the benefits of renewable energy?,Renewable energy provides clean, sustainable power sources...
+   How does machine learning work?,Machine learning algorithms learn patterns from data...
+   ```
+
+2. **Configure Maxim credentials in `.env`:**
+   ```env
+   MAXIM_API_KEY=your-maxim-api-key
+   MAXIM_WORKSPACE_ID=your-workspace-id
+   ```
+
+3. **Run bulk evaluation:**
+   ```bash
+   python -m evals.bulk_evals
+   ```
+
+#### CSV Format Requirements
+
+Your CSV file must contain these columns:
+- **`Input`**: The query or prompt to send to your agent
+- **`Expected_output`**: The expected response for evaluation
+
+See `evals/README.md` for detailed documentation and advanced usage.
+
 ### Configuration Files
 
 #### adopt_profile.json
@@ -226,6 +265,10 @@ The `dev.env` file contains the following configuration:
 - `AWS_REGION`: AWS Region where Bedrock is available (default: us-east-1)
 - `BEDROCK_MODEL`: Bedrock Converse model to use for capability checking (default: anthropic.claude-3-sonnet-20240229-v1:0)
 
+#### Maxim Evaluation Configuration (Required for Bulk Evaluations)
+- `MAXIM_API_KEY`: Maxim API Key for evaluation platform
+- `MAXIM_WORKSPACE_ID`: Maxim Workspace ID for storing evaluation results
+
 ### Required Variables
 
 You'll need to configure all the variables in the `dev.env` file:
@@ -252,6 +295,10 @@ To obtain your `ADOPT_CLIENT_ID` and `ADOPT_CLIENT_SECRET`, follow these steps f
 - `AWS_SECRET_ACCESS_KEY`: Your AWS Secret Access Key
 - `AWS_REGION`: AWS region where Bedrock is available
 - `BEDROCK_MODEL`: Bedrock model identifier
+
+#### For Bulk Evaluations (Additional):
+- `MAXIM_API_KEY`: Your Maxim API key for evaluation platform
+- `MAXIM_WORKSPACE_ID`: Your Maxim workspace ID for storing results
 
 ## Development
 

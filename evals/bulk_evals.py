@@ -4,10 +4,13 @@
 import os
 import pandas as pd
 import json
+import requests
+import argparse
+from typing import List, Any, Dict, Union
 from maxim import maxim
 from maxim.models import YieldedOutput
 from examples import read_env
-from examples.action_api_samples.api_sample import run_simple_action, load_adopt_profile
+from examples.action_api_samples.api_sample import run_simple_action, load_adopt_profile, get_auth_token
 from langchain_core.messages import HumanMessage
 
 # Get environment variables
@@ -15,6 +18,37 @@ adopt_env = read_env()
 
 # Initialize Maxim SDK
 maxim = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
+
+def filter_json_fields(data: Union[Dict, List, Any], exclude_fields: List[str]) -> Union[Dict, List, Any]:
+    """
+    Custom serializer that filters out specified fields from JSON data.
+    
+    Args:
+        data: The JSON data (dict, list, or primitive) to filter
+        exclude_fields: List of field names to exclude from the result
+        
+    Returns:
+        Filtered data with excluded fields removed
+    """
+    if not exclude_fields:
+        return data
+    
+    if isinstance(data, dict):
+        # Create a new dict excluding specified fields
+        filtered_dict = {}
+        for key, value in data.items():
+            if key not in exclude_fields:
+                # Recursively filter nested structures
+                filtered_dict[key] = filter_json_fields(value, exclude_fields)
+        return filtered_dict
+    
+    elif isinstance(data, list):
+        # Recursively filter each item in the list
+        return [filter_json_fields(item, exclude_fields) for item in data]
+    
+    else:
+        # Return primitive values as-is
+        return data
 
 def load_test_data_from_csv(csv_file_path: str) -> list:
     """
@@ -46,21 +80,25 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
             "expected_output": str(row["Expected_output"]),
             "context": "",  # Optional context column, default to empty
         })
-    print(f"Printing test data loaded from CSV file: {test_data}")
     return test_data
 
 
-# Load test data from CSV file
-# You can change this path to your CSV file
-csv_file_path = "evals/test_data.csv"  # Default path, can be overridden
-test_data = load_test_data_from_csv(csv_file_path)
+# Default CSV file path - will be overridden by CLI args if provided
+default_csv_file_path = "evals/test_data.csv"
 
 
-def call_local_agent(data, profile):
-    """Function to call your local agent endpoint using Adopt API"""
+def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None):
+    """Function to call your local agent endpoint using Adopt API
+    
+    Args:
+        data: Input data dictionary
+        profile: Adopt profile configuration
+        access_token: Authentication token
+        exclude_fields: List of field names to exclude from the response
+    """
     try:
         # Call the actual Adopt API using the simpler run_simple_action function
-        response = run_simple_action(data["input"], profile)
+        response = run_simple_action(data["input"], profile, access_token)
 
         # Parse the response if it's a string representation of a list
         import ast
@@ -68,22 +106,45 @@ def call_local_agent(data, profile):
             # Try to parse the response as a Python literal (list/dict)
             parsed_response = ast.literal_eval(response)
             
-            # If it's a list with dict elements, extract the data
+            # Apply field filtering if exclude_fields is provided
+            if exclude_fields:
+                parsed_response = filter_json_fields(parsed_response, exclude_fields)
+            
+            # If it's a list with dict elements, extract and combine header, data, and footer
             if isinstance(parsed_response, list) and len(parsed_response) > 0:
                 first_item = parsed_response[0]
-                if isinstance(first_item, dict) and 'data' in first_item:
-                    data_field = first_item['data']
+                if isinstance(first_item, dict):
+                    # Initialize parts of the response
+                    response_parts = []
                     
-                    # If data field is an array, convert to string with newlines
-                    if isinstance(data_field, list):
-                        # Convert list of action items to readable string
-                        readable_data = []
-                        for item in data_field:
-                            if isinstance(item, dict) and 'Name' in item:
-                                readable_data.append(item['Name'])
-                        response_data = '\n'.join(readable_data)
-                    else:
-                        response_data = str(data_field)
+                    # Add header_message if present
+                    if 'header_message' in first_item and first_item['header_message']:
+                        response_parts.append(first_item['header_message'])
+                    
+                    # Add data field
+                    if 'data' in first_item:
+                        data_field = first_item['data']
+                        
+                        # If data field is a list of dicts, convert to readable string
+                        if isinstance(data_field, list):
+                            data_strings = []
+                            for item in data_field:
+                                if isinstance(item, dict):
+                                    # Convert dict to readable key-value pairs
+                                    item_str = ', '.join([f"{k}: {v}" for k, v in item.items()])
+                                    data_strings.append(item_str)
+                                else:
+                                    data_strings.append(str(item))
+                            response_parts.append('\n'.join(data_strings))
+                        else:
+                            response_parts.append(str(data_field))
+                    
+                    # Add footer_message if present
+                    if 'footer_message' in first_item and first_item['footer_message']:
+                        response_parts.append(first_item['footer_message'])
+                    
+                    # Combine all parts with double newlines for readability
+                    response_data = '\n\n'.join(response_parts)
                 else:
                     response_data = response
             else:
@@ -91,7 +152,6 @@ def call_local_agent(data, profile):
         except (ValueError, SyntaxError):
             # If parsing fails, use the original response
             response_data = response
-
         # Return the agent's response in the expected YieldedOutput format
         return YieldedOutput(
             data=response_data,
@@ -106,7 +166,29 @@ def call_local_agent(data, profile):
         )
 
 
-def save_results_to_csv(test_data, maxim_result, actual_outputs):
+def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
+    """Fetch individual test run entries from Maxim API"""
+    url = "https://api.getmaxim.ai/v1/test-runs/entries"
+    
+    headers = {
+        "x-maxim-api-key": api_key
+    }
+    
+    params = {
+        "workspaceId": workspace_id,
+        "id": test_run_id
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch test run entries: {e}")
+        return None
+
+
+def save_results_to_csv( maxim_result):
     """Save evaluation results to CSV file"""
     import csv
     from datetime import datetime
@@ -115,36 +197,60 @@ def save_results_to_csv(test_data, maxim_result, actual_outputs):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_filename = f"evals/evaluation_results_{timestamp}.csv"
     
+    # Extract test run ID from the result link
+    # Link format: https://app.getmaxim.ai/workspace/{workspace_id}/testrun/{test_run_id}
+    result_link = maxim_result.test_run_result.link
+    test_run_id = result_link.split('/')[-1]
+    
+    print(f"\nFetching detailed test run entries for test run ID: {test_run_id}")
+    
+    # Fetch detailed entries from Maxim API
+    entries_response = fetch_test_run_entries(
+        test_run_id=test_run_id,
+        workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
+        api_key=adopt_env.MAXIM_API_KEY
+    )
+    
+    if not entries_response or 'data' not in entries_response:
+        print("Failed to fetch test run entries from API")
+        return
+    
+    entries = entries_response['data']['entries']
+    
     # Prepare CSV data
     csv_data = []
     
-    # Extract bias scores and similarity scores from Maxim result
-    bias_scores = []
-    similarity_passes = []
-    
-    for test_result in maxim_result.test_run_result.result:
-        # Extract bias score
-        bias_score = test_result.individual_evaluator_mean_score['Bias']
-        bias_scores.append(bias_score.score)
+    for entry in entries:
+        # Extract input, output, and expected output
+        input_text = entry['input']['payload']
+        actual_output = entry['output']['payload']
+        expected_output = entry['expectedOutput']['payload']
         
-        # Extract similarity pass/fail
-        similarity_score = test_result.individual_evaluator_mean_score['Ragas Answer Semantic Similarity']
-        similarity_passes.append("yes" if similarity_score.is_pass else "no")
-    
-    for i, test_case in enumerate(test_data):
-        # Get actual output from the passed array
-        actual_output = actual_outputs[i] if i < len(actual_outputs) else "No output captured"
+        # Extract individual evaluator scores
+        stats = entry.get('stats', {})
+        overall_results = stats.get('overallEvaluatorMeanResult', [])
+        pass_fail_results = stats.get('overallPassFailResult', [])
+        
+        # Find Bias score
+        bias_score = 0
+        for result in overall_results:
+            if result['name'] == 'Bias':
+                bias_score = result['value']
+                break
+        
+        # Find Similarity pass/fail
+        similarity = "no"
+        for result in pass_fail_results:
+            if result['name'] == 'Ragas Answer Semantic Similarity':
+                similarity = "yes" if result['value']['pass'] else "no"
+                break
         
         # Escape newlines in actual output to match expected output format
         actual_output = actual_output.replace('\n', '\\n')
         
-        # Get bias score and similarity result for this test case
-        bias_score = bias_scores[i]
-        similarity = similarity_passes[i]
-        
         csv_data.append({
-            'input': test_case['input'],
-            'expected_output': test_case['expected_output'],
+            'input': input_text,
+            'expected_output': expected_output,
             'actual_output': actual_output,
             'bias': bias_score,
             'similarity': similarity
@@ -171,6 +277,45 @@ def save_results_to_csv(test_data, maxim_result, actual_outputs):
 
 def main():
     """Main function to run bulk evaluations sequentially"""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Run bulk evaluations for AdoptXchange using Maxim",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run with default CSV and no field exclusion
+  python evals/bulk_evals.py
+  
+  # Exclude specific fields from response
+  python evals/bulk_evals.py --exclude-fields header_message,footer_message
+  
+  # Use custom CSV file with field exclusion
+  python evals/bulk_evals.py --csv-file path/to/data.csv --exclude-fields id,timestamp
+        """
+    )
+    
+    parser.add_argument(
+        '--csv-file',
+        type=str,
+        default=default_csv_file_path,
+        help=f'Path to the CSV file with test data (default: {default_csv_file_path})'
+    )
+    
+    parser.add_argument(
+        '--exclude-fields',
+        type=str,
+        default='',
+        help='Comma-separated list of field names to exclude from response (e.g., header_message,footer_message,id)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Parse exclude fields from comma-separated string
+    exclude_fields = [field.strip() for field in args.exclude_fields.split(',') if field.strip()]
+    
+    # Load test data from specified CSV file
+    test_data = load_test_data_from_csv(args.csv_file)
+    
     # Check for MAXIM API key
     if not adopt_env.MAXIM_API_KEY:
         raise ValueError("MAXIM_API_KEY environment variable is required")
@@ -179,21 +324,26 @@ def main():
         raise ValueError("MAXIM_WORKSPACE_ID environment variable is required")
 
     print("Starting bulk evaluation process...")
+    print(f"CSV file: {args.csv_file}")
     print(f"Loaded {len(test_data)} test cases from CSV")
+    
+    if exclude_fields:
+        print(f"Excluding fields from response: {', '.join(exclude_fields)}")
+    else:
+        print("No field exclusion applied")
 
     # Load the adopt profile configuration once
     profile = load_adopt_profile()
     
-    # Array to capture actual outputs during Maxim execution
-    actual_outputs = []
-
+    # Get authentication token once for all test cases
+    print("Getting authentication token...")
+    access_token = get_auth_token()
+    print("Authentication token obtained successfully")
     
     try:
-        # Create a wrapper function for Maxim that includes the profile and captures outputs
+        # Create a wrapper function for Maxim that includes the profile, token, and exclude fields
         def call_local_agent_with_profile(data):
-            result = call_local_agent(data, profile)
-            actual_outputs.append(result.data)  # Capture the actual output
-            return result
+            return call_local_agent(data, profile, access_token, exclude_fields)
         
         result = (
             maxim.create_test_run(
@@ -214,7 +364,7 @@ def main():
         print(f"Maxim test run completed! View results: {result}")
         
         # Extract results and save to CSV
-        save_results_to_csv(test_data, result, actual_outputs)
+        save_results_to_csv(result)
         
     except Exception as e:
         print(f"Failed to run Maxim evaluation: {e}")

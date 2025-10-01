@@ -87,14 +87,15 @@ def load_adopt_profile_from_path(profile_path: str) -> Dict[str, Any]:
         print(f"Error parsing profile file: {e}")
         raise ValueError(f"Invalid JSON in profile file: {e}")
 
-def sync_adopt_actions() -> None:
+def sync_adopt_actions(access_token: str = None) -> None:
     """Syncing actions with the training pipeline if running on prem."""
     try:
         # Get environment variables
         adopt_env = get_adopt_env()
 
-        # Get authentication token
-        access_token = get_auth_token()
+        # Get authentication token if not provided
+        if access_token is None:
+            access_token = get_auth_token()
         
         # Now sync actions with the training pipeline
         # This would typically involve calling an actions sync endpoint
@@ -125,13 +126,14 @@ def sync_adopt_actions() -> None:
         print(f"Unexpected error occurred: {e}")
 
 
-def list_actions() -> AdoptActionListResponse:
+def list_actions(access_token: str = None) -> AdoptActionListResponse:
     """Test listing all actions."""
 
     adopt_env = get_adopt_env()
 
-    # Get authentication token
-    access_token = get_auth_token()
+    # Get authentication token if not provided
+    if access_token is None:
+        access_token = get_auth_token()
     
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/list"
     headers = {
@@ -155,12 +157,13 @@ def list_actions() -> AdoptActionListResponse:
         print("Warning: No capabilities found in response")
     return AdoptActionListResponse(**json_response)
 
-def run_list_actions_message(profile: Dict[str, Any]) -> str:
+def run_list_actions_message(profile: Dict[str, Any], access_token: str = None) -> str:
     """Running a list actions meta message via APIs."""
     adopt_env = get_adopt_env()
 
-    # Get authentication token
-    access_token = get_auth_token()
+    # Get authentication token if not provided
+    if access_token is None:
+        access_token = get_auth_token()
         
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
@@ -192,12 +195,13 @@ def run_list_actions_message(profile: Dict[str, Any]) -> str:
         raise ValueError(f"Action message content is not a list. It is: {type(action_message.content)}") # pyright: ignore
     return str(action_message.content) # pyright: ignore
 
-def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any]) -> str:
+def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None) -> str:
     """Test running a specific action via langchain adapter."""
     adopt_env = get_adopt_env()
 
-    # Get authentication token
-    access_token = get_auth_token()
+    # Get authentication token if not provided
+    if access_token is None:
+        access_token = get_auth_token()
         
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
@@ -211,7 +215,7 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         security_params=profile.get("security_params", {})
     )
     response = requests.post(url, headers=headers, json=action_request.model_dump())
-    
+    print(f"Request payload: {response}")
     if response.status_code != 200:
         print(f"Failed to run action. Status code: {response.status_code}")
         print(f"Response: {response.text}")
@@ -229,7 +233,7 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
     return str(ai_message.content) # pyright: ignore
 
-def run_simple_action(command: str, profile: Dict[str, Any]) -> str:
+def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None) -> str:
     """Simple function to run an action with just a command string.
     
     This is a convenience function that creates a HumanMessage from the command
@@ -238,12 +242,13 @@ def run_simple_action(command: str, profile: Dict[str, Any]) -> str:
     Args:
         command: The command string to execute
         profile: The adopt profile configuration
+        access_token: Optional authentication token to reuse
         
     Returns:
         The response from the action execution
     """
     messages = [HumanMessage(content=command)]
-    return run_action(messages, profile)
+    return run_action(messages, profile, access_token)
 
 def main():
     """Main entry point for the Adopt Action API Samples."""
