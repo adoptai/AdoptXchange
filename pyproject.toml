@@ -14,7 +14,7 @@ langchain-aws = "^0.2.0"
 langgraph = "^0.2.0"
 pydantic = "^2.0.0"
 python-dotenv = "^1.0.0"
-pandas =  "^2.0.0"
+pandas = "^2.0.0"
 maxim-py = "^3.10.9"
 
 [tool.poetry.group.dev.dependencies]
