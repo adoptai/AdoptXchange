@@ -46,7 +46,7 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
             "expected_output": str(row["Expected_output"]),
             "context": "",  # Optional context column, default to empty
         })
-    print(f"printing test data loaded from CSV file: {test_data}")
+    print(f"Printing test data loaded from CSV file: {test_data}")
     return test_data
 
 
