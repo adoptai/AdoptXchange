@@ -134,7 +134,7 @@ The tool calling example (`examples/tool_calling_samples/tool_calling_sample.py`
 - **Dynamic Tool Generation**: Automatically creates LangChain tools from Adopt capabilities
 - **Native Tool Calling**: Uses LangChain's built-in tool calling mechanisms
 - **Action-Specific Execution**: Each tool directly executes its corresponding Adopt action by ID
-- **Parallel Execution**: LLM can call multiple tools simultaneously when appropriate
+- **Multiple Tool Calls per Turn**: LLM can select and execute multiple tools in a single turn when appropriate
 
 #### How It Works
 
