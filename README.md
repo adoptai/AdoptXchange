@@ -125,6 +125,57 @@ source dev.env
 poetry run python examples/langgraph_samples/langgraph_sample.py
 ```
 
+### Tool Calling Integration
+
+The tool calling example (`examples/tool_calling_samples/tool_calling_sample.py`) demonstrates native LangChain tool calling where each Adopt capability becomes a discrete tool that the LLM can automatically select and execute.
+
+#### Features
+
+- **Dynamic Tool Generation**: Automatically creates LangChain tools from Adopt capabilities
+- **Native Tool Calling**: Uses LangChain's built-in tool calling mechanisms
+- **Action-Specific Execution**: Each tool directly executes its corresponding Adopt action by ID
+- **Parallel Execution**: LLM can call multiple tools simultaneously when appropriate
+
+#### How It Works
+
+1. Fetches Adopt capabilities using `execution_type=TOOL`
+2. Dynamically creates a LangChain tool for each capability
+3. Binds all tools to an AWS Bedrock model
+4. LLM automatically selects and calls appropriate tools based on user requests
+
+#### Running the Example
+
+```bash
+# Set up environment variables
+source dev.env
+
+# Run the tool calling example
+poetry run python examples/tool_calling_samples/tool_calling_sample.py
+```
+
+#### Usage in Your Own Code
+
+```python
+from examples.tool_calling_samples.tool_factory import create_all_tools
+from examples.action_api_samples.api_sample import list_actions_by_type, load_adopt_profile
+
+# Load configuration
+profile = load_adopt_profile()
+
+# Get capabilities as tools
+capabilities = list_actions_by_type(execution_type="TOOL").capabilities
+tools = create_all_tools(capabilities, profile)
+
+# Use with any LangChain model that supports tool calling
+from langchain_aws import ChatBedrockConverse
+model = ChatBedrockConverse(...)
+model_with_tools = model.bind_tools(tools)
+
+# Execute
+response = model_with_tools.invoke("Create a segment named 'Test'")
+```
+
+
 ### Available Functions
 
 The sample script provides several functions for interacting with the Adopt API:
@@ -218,6 +269,8 @@ Before using the Adopt API, you need to create the `examples/adopt_profile.json`
    - Authorization headers
    - CSRF tokens
    - Session IDs
+   - **`user_org_id`** - Required organization user ID
+   - **`org_auth_id`** - Required organization auth ID
    - Any other platform-specific authentication parameters
 
 The `examples/adopt_profile.json` file contains the configuration settings that are passed to Adopt when running actions. This file is essential for ensuring that the right settings are used when executing messages through the Adopt API.
@@ -229,7 +282,11 @@ The `examples/adopt_profile.json` file contains the configuration settings that 
     "application_base_url": "https://test6sense.abm.6sense.com", 
     "workflow_params": {},
     "security_params": {
-        "cookie": ""
+        "cookie": "your_session_cookie_here",
+        "x-csrftoken": "your_csrf_token_here",
+        "referer": "https://test6sense.abm.6sense.com",
+        "user_org_id": "your_org_id",
+        "org_auth_id": "your_org_auth_id"
     }
 }
 ```

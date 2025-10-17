@@ -11,6 +11,7 @@ class AdoptAction(BaseModel):
     id: str = Field(default="", description="Action ID")
     title: str = Field(default="", description="Action name")
     description: str = Field(default="", description="Action description")
+    required_inputs: List[str] = Field(default_factory=list, description="List of required input parameters")
 
 class AdoptActionListResponse(BaseModel):
     """Class to define the models for the Adopt API"""
@@ -23,6 +24,8 @@ class AdoptActionRunRequest(BaseModel):
     application_base_url: str = Field(default="", description="Application Base URL for platform")
     workflow_params: dict[str, Any] = Field(default_factory=dict, description="Workflow parameters")
     security_params: dict[str, Any] = Field(default_factory=dict, description="Security parameters")
+    action_id: str = Field(default="", description="Specific action ID to execute")
+    execution_type: str = Field(default="DEFAULT", description="Execution type (DEFAULT or TOOL)")
 
 class AdoptActionRunResponse(BaseModel):
     """Class to define the models for the Adopt API"""
