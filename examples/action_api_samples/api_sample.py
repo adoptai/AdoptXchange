@@ -266,7 +266,10 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         print(f"API returned unsuccessful status: {json_response}")
         raise ValueError(f"API returned unsuccessful status: {json_response}")
     
-    # Check for expected content in response (these are specific to the test action)
+    # Check for expected content in response
+    if "ai_message" not in json_response:
+        raise ValueError(f"API response missing 'ai_message' field: {json_response}")
+    
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, list): # pyright: ignore
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
@@ -357,6 +360,9 @@ def run_action_by_id(
         raise ValueError(f"API returned unsuccessful status: {json_response}")
     
     # Check for expected content in response
+    if "ai_message" not in json_response:
+        raise ValueError(f"API response missing 'ai_message' field: {json_response}")
+    
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, list): # pyright: ignore
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
