@@ -77,16 +77,26 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
             # For actions with required_inputs, extract them as workflow_params
             workflow_params = {}
             if capability.required_inputs:
-                for req_input in capability.required_inputs:
-                    if req_input in actual_kwargs:
-                        workflow_params[req_input] = actual_kwargs[req_input]
+                # Validate that all required inputs are provided
+                missing_inputs = [
+                    req_input for req_input in capability.required_inputs 
+                    if req_input not in actual_kwargs
+                ]
                 
-                # If no workflow params were found, try to use user_input as the message
-                if not workflow_params and user_input:
-                    # Let the message content be processed by Adopt
-                    pass
-                elif not user_input:
-                    # Use a generic message if only params are provided
+                if missing_inputs:
+                    # Raise clear error about missing required parameters
+                    missing_str = ", ".join(missing_inputs)
+                    raise ToolException(
+                        f"Missing required parameters for '{capability.title}': {missing_str}. "
+                        f"Please provide: {', '.join(capability.required_inputs)}"
+                    )
+                
+                # Extract all required inputs as workflow_params
+                for req_input in capability.required_inputs:
+                    workflow_params[req_input] = actual_kwargs[req_input]
+                
+                # Use generic message if only params are provided
+                if not user_input:
                     user_input = f"Execute {capability.title}"
             else:
                 # For actions without required inputs, just use user_input from actual_kwargs
