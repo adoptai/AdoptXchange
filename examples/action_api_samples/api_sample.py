@@ -273,7 +273,7 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, list): # pyright: ignore
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
-    return str(ai_message.content) # pyright: ignore
+    return "\n".join(str(item) for item in ai_message.content) # pyright: ignore
 
 def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None) -> str:
     """Simple function to run an action with just a command string.
@@ -366,7 +366,7 @@ def run_action_by_id(
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, list): # pyright: ignore
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
-    return str(ai_message.content) # pyright: ignore
+    return "\n".join(str(item) for item in ai_message.content) # pyright: ignore
 
 def main():
     """Main entry point for the Adopt Action API Samples."""
