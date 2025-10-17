@@ -157,6 +157,37 @@ def list_actions(access_token: str = None) -> AdoptActionListResponse:
         print("Warning: No capabilities found in response")
     return AdoptActionListResponse(**json_response)
 
+def list_actions_by_type(execution_type: str = "DEFAULT", access_token: str = None) -> AdoptActionListResponse:
+    """List actions filtered by execution type (e.g., 'TOOL')."""
+    adopt_env = get_adopt_env()
+
+    # Get authentication token if not provided
+    if access_token is None:
+        access_token = get_auth_token()
+    
+    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/list"
+    params = {"execution_type": execution_type}
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(url, headers=headers, params=params)
+    
+    if response.status_code != 200:
+        print(f"Failed to list actions. Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+        raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
+    
+    json_response = response.json()
+    
+    if "capabilities" not in json_response:
+        raise ValueError(f"Expected 'capabilities' in response, got: {json_response}")
+    if not isinstance(json_response["capabilities"], list):
+        raise ValueError(f"Expected 'capabilities' to be a list, got: {type(json_response['capabilities'])}")
+    if len(json_response["capabilities"]) == 0:
+        print("Warning: No capabilities found in response")
+    return AdoptActionListResponse(**json_response)
+
 def run_list_actions_message(profile: Dict[str, Any], access_token: str = None) -> str:
     """Running a list actions meta message via APIs."""
     adopt_env = get_adopt_env()
@@ -167,19 +198,20 @@ def run_list_actions_message(profile: Dict[str, Any], access_token: str = None) 
         
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
-        "Authorization": f"Bearer {access_token}"
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
     }
-    action_request = AdoptActionRunRequest(
-        messages=[
-            HumanMessage(content="List all actions")
-        ],
-        base_url=profile.get("base_url", ""),
-        application_base_url=profile.get("application_base_url", ""),
-        workflow_params=profile.get("workflow_params", {}),
-        security_params=profile.get("security_params", {})
-    )
-    response = requests.post(url, headers=headers,
-        json=action_request.model_dump())
+    
+    # Manually build the request payload
+    request_payload = {
+        "messages": [HumanMessage(content="List all actions").model_dump()],
+        "base_url": profile.get("base_url", ""),
+        "application_base_url": profile.get("application_base_url", ""),
+        "workflow_params": profile.get("workflow_params", {}),
+        "security_params": profile.get("security_params", {})
+    }
+    
+    response = requests.post(url, headers=headers, json=request_payload)
     
     if response.status_code != 200:
         print(f"Failed to run list actions message. Status code: {response.status_code}")
@@ -205,16 +237,23 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
-        "Authorization": f"Bearer {access_token}"
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
     }
-    action_request = AdoptActionRunRequest(
-        messages=list(messages),
-        base_url=profile.get("base_url", ""),
-        application_base_url=profile.get("application_base_url", ""),
-        workflow_params=profile.get("workflow_params", {}),
-        security_params=profile.get("security_params", {})
-    )
-    response = requests.post(url, headers=headers, json=action_request.model_dump())
+    
+    # Manually convert messages to dicts for proper serialization
+    messages_dict = [msg.model_dump() if hasattr(msg, 'model_dump') else msg.dict() for msg in messages]
+    
+    # Build request payload manually
+    request_payload = {
+        "messages": messages_dict,
+        "base_url": profile.get("base_url", ""),
+        "application_base_url": profile.get("application_base_url", ""),
+        "workflow_params": profile.get("workflow_params", {}),
+        "security_params": profile.get("security_params", {})
+    }
+    
+    response = requests.post(url, headers=headers, json=request_payload)
 
     if response.status_code != 200:
         print(f"Failed to run action. Status code: {response.status_code}")
@@ -227,11 +266,14 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         print(f"API returned unsuccessful status: {json_response}")
         raise ValueError(f"API returned unsuccessful status: {json_response}")
     
-    # Check for expected content in response (these are specific to the test action)
+    # Check for expected content in response
+    if "ai_message" not in json_response:
+        raise ValueError(f"API response missing 'ai_message' field: {json_response}")
+    
     ai_message = AIMessage(**json_response["ai_message"])
     if not isinstance(ai_message.content, list): # pyright: ignore
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
-    return str(ai_message.content) # pyright: ignore
+    return "\n".join(str(item) for item in ai_message.content) # pyright: ignore
 
 def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None) -> str:
     """Simple function to run an action with just a command string.
@@ -249,6 +291,82 @@ def run_simple_action(command: str, profile: Dict[str, Any], access_token: str =
     """
     messages = [HumanMessage(content=command)]
     return run_action(messages, profile, access_token)
+
+def run_action_by_id(
+    action_id: str,
+    user_input: str,
+    profile: Dict[str, Any],
+    workflow_params: Dict[str, Any] = None,
+    access_token: str = None
+) -> str:
+    """Execute a specific action by its ID.
+    
+    This function is designed for tool calling scenarios where you want to
+    execute a specific action directly by its ID.
+    
+    Args:
+        action_id: The unique ID of the action to execute
+        user_input: Natural language description of what to do
+        profile: The adopt profile configuration
+        workflow_params: Optional workflow parameters for actions with required inputs
+        access_token: Optional authentication token to reuse
+        
+    Returns:
+        The response from the action execution
+    """
+    adopt_env = get_adopt_env()
+
+    # Get authentication token if not provided
+    if access_token is None:
+        access_token = get_auth_token()
+        
+    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Create message with user input
+    message = HumanMessage(content=user_input)
+    
+    # Merge workflow_params with profile workflow_params
+    combined_workflow_params = {**profile.get("workflow_params", {})}
+    if workflow_params:
+        combined_workflow_params.update(workflow_params)
+    
+    # Build request payload with action_id and execution_type
+    # NOTE: We use DEFAULT execution type for running actions, even if they were
+    # discovered using TOOL execution type. The backend will determine tool mode
+    # based on the action's is_tool_mode flag in the database.
+    request_payload = {
+        "messages": [message.model_dump()],
+        "action_id": action_id,
+        "execution_type": "DEFAULT",
+        "base_url": profile.get("base_url", ""),
+        "application_base_url": profile.get("application_base_url", ""),
+        "workflow_params": combined_workflow_params,
+        "security_params": profile.get("security_params", {})
+    }
+    
+    response = requests.post(url, headers=headers, json=request_payload)
+
+    if response.status_code != 200:
+        raise ValueError(f"API request failed with status code {response.status_code}: {response.text}")
+    
+    json_response = response.json()
+    
+    if json_response.get("status") != True:
+        print(f"API returned unsuccessful status: {json_response}")
+        raise ValueError(f"API returned unsuccessful status: {json_response}")
+    
+    # Check for expected content in response
+    if "ai_message" not in json_response:
+        raise ValueError(f"API response missing 'ai_message' field: {json_response}")
+    
+    ai_message = AIMessage(**json_response["ai_message"])
+    if not isinstance(ai_message.content, list): # pyright: ignore
+        raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
+    return "\n".join(str(item) for item in ai_message.content) # pyright: ignore
 
 def main():
     """Main entry point for the Adopt Action API Samples."""
