@@ -93,7 +93,9 @@ def capability_checker_node(state: AgentState) -> AgentState:
 
         # Get response from Bedrock
         response = bedrock_model.invoke([HumanMessage(content=capability_check_prompt)])
-        can_handle = response.content.strip().upper() == "YES" # type: ignore
+        bedrock_response = str(response.content).strip() # type: ignore
+        # Check if response starts with YES (Claude often adds explanations after)
+        can_handle = bedrock_response.upper().startswith("YES")
         
         print(f"✅ Capability check result: {'CAN HANDLE' if can_handle else 'CANNOT HANDLE'}")
         
@@ -129,7 +131,7 @@ def action_runner_node(state: AgentState) -> AgentState:
     
     try:
         # Load the adopt profile
-        adopt_profile = state.get("adopt_profile", {})
+        adopt_profile = state["adopt_profile"]
         
         # Run the action using Adopt with the full message history
         result = run_action(list(message_history), adopt_profile)  # type: ignore
@@ -158,7 +160,7 @@ def should_continue(state: AgentState) -> Literal["run_action", "end"]:
     """
     Determine whether to continue to the action runner or end the workflow.
     """
-    if state.get("can_handle_request", False):
+    if state["can_handle_request"]:
         return "run_action"
     else:
         return "end"

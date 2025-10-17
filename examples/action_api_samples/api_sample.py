@@ -167,19 +167,20 @@ def run_list_actions_message(profile: Dict[str, Any], access_token: str = None) 
         
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
-        "Authorization": f"Bearer {access_token}"
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
     }
-    action_request = AdoptActionRunRequest(
-        messages=[
-            HumanMessage(content="List all actions")
-        ],
-        base_url=profile.get("base_url", ""),
-        application_base_url=profile.get("application_base_url", ""),
-        workflow_params=profile.get("workflow_params", {}),
-        security_params=profile.get("security_params", {})
-    )
-    response = requests.post(url, headers=headers,
-        json=action_request.model_dump())
+    
+    # Manually build the request payload
+    request_payload = {
+        "messages": [HumanMessage(content="List all actions").model_dump()],
+        "base_url": profile.get("base_url", ""),
+        "application_base_url": profile.get("application_base_url", ""),
+        "workflow_params": profile.get("workflow_params", {}),
+        "security_params": profile.get("security_params", {})
+    }
+    
+    response = requests.post(url, headers=headers, json=request_payload)
     
     if response.status_code != 200:
         print(f"Failed to run list actions message. Status code: {response.status_code}")
@@ -205,16 +206,23 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         
     url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
     headers = {
-        "Authorization": f"Bearer {access_token}"
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
     }
-    action_request = AdoptActionRunRequest(
-        messages=list(messages),
-        base_url=profile.get("base_url", ""),
-        application_base_url=profile.get("application_base_url", ""),
-        workflow_params=profile.get("workflow_params", {}),
-        security_params=profile.get("security_params", {})
-    )
-    response = requests.post(url, headers=headers, json=action_request.model_dump())
+    
+    # Manually convert messages to dicts for proper serialization
+    messages_dict = [msg.model_dump() if hasattr(msg, 'model_dump') else msg.dict() for msg in messages]
+    
+    # Build request payload manually
+    request_payload = {
+        "messages": messages_dict,
+        "base_url": profile.get("base_url", ""),
+        "application_base_url": profile.get("application_base_url", ""),
+        "workflow_params": profile.get("workflow_params", {}),
+        "security_params": profile.get("security_params", {})
+    }
+    
+    response = requests.post(url, headers=headers, json=request_payload)
 
     if response.status_code != 200:
         print(f"Failed to run action. Status code: {response.status_code}")

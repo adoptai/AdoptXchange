@@ -44,9 +44,9 @@ python examples/action_api_samples/api_sample.py [OPTIONS]
 Available options:
 - `--sync`: Sync actions with the Adopt training pipeline
 - `--get-list`: List all available actions from the Adopt API
-- `--list`: List actions via a natural language message
-- `--run`: Run a specific action (requires `--command` parameter)
-- `--command TEXT`: Specify the command to run when using `--run`
+- `--list`: List actions via a natural language message (requires `--profile` parameter)
+- `--run TEXT`: Run a specific action with the specified command (requires `--profile` parameter)
+- `--profile PATH`: Path to the adopt profile JSON file (required for `--list` and `--run` commands)
 
 ### Examples
 
@@ -62,12 +62,12 @@ Available options:
 
 3. **List actions using natural language:**
    ```bash
-   source dev.env && poetry run python examples/action_api_samples/api_sample.py --list
+   source dev.env && poetry run python examples/action_api_samples/api_sample.py --list --profile examples/adopt_profile.json
    ```
 
 4. **Run a specific action:**
    ```bash
-   source dev.env && poetry run python examples/action_api_samples/api_sample.py --run --command "Create a segment named 'Test Segment'"
+   source dev.env && poetry run python examples/action_api_samples/api_sample.py --run "Create a segment named 'Test Segment'" --profile examples/adopt_profile.json
    ```
 
 ### LangGraph Agent
