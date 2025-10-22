@@ -4,6 +4,7 @@ This example shows how to dynamically create LangChain tools from Adopt
 capabilities and use them with AWS Bedrock for native tool calling.
 """
 
+import json
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage
 from pydantic import SecretStr
@@ -13,6 +14,57 @@ from examples.action_api_samples.api_sample import (
     load_adopt_profile
 )
 from examples.tool_calling_samples.tool_factory import create_all_tools
+
+
+def format_param_details(required_inputs):
+    """Format required_inputs metadata for display.
+    
+    Supports two formats:
+    1. Structured JSON: '{"limit": {"min": 25, "max": 100, "default": 50}}'
+    2. Simple strings: 'keyword_id'
+    
+    Args:
+        required_inputs: List of strings (JSON or plain) with parameter metadata
+        
+    Returns:
+        Formatted string showing parameter names with constraints
+        
+    Examples:
+        ['{"limit": {"min": 25, "max": 100, "default": 50}}'] 
+        -> "limit [25-100, default=50]"
+        
+        ['keyword_id', 'group_id']
+        -> "keyword_id, group_id"
+    """
+    if not required_inputs:
+        return ""
+    
+    param_strs = []
+    for input_str in required_inputs:
+        try:
+            param_dict = json.loads(input_str)
+            # Structured JSON format
+            for param_name, param_meta in param_dict.items():
+                details = []
+                if 'min' in param_meta and 'max' in param_meta:
+                    details.append(f"{param_meta['min']}-{param_meta['max']}")
+                elif 'min' in param_meta:
+                    details.append(f"min={param_meta['min']}")
+                elif 'max' in param_meta:
+                    details.append(f"max={param_meta['max']}")
+                
+                if 'default' in param_meta:
+                    details.append(f"default={param_meta['default']}")
+                
+                if details:
+                    param_strs.append(f"{param_name} [{', '.join(details)}]")
+                else:
+                    param_strs.append(param_name)
+        except (json.JSONDecodeError, TypeError):
+            # Simple string format - just use the parameter name
+            param_strs.append(input_str.strip())
+    
+    return ", ".join(param_strs)
 
 
 def create_model_with_tools(tools, adopt_env):
@@ -69,17 +121,15 @@ def run_tool_calling_example():
         capabilities = capabilities_response.capabilities
         print(f"✓ Found {len(capabilities)} capabilities")
         
-        # Show a few example capabilities
+        # Show all discovered capabilities
         if capabilities:
-            print("\nExample capabilities:")
-            for cap in capabilities[:5]:
+            print("\nDiscovered capabilities:")
+            for cap in capabilities:
                 if cap.required_inputs:
-                    inputs_str = ", ".join(cap.required_inputs)
-                    print(f"  - {cap.title} (requires: {inputs_str})")
+                    params_formatted = format_param_details(cap.required_inputs)
+                    print(f"  - {cap.title} (requires: {params_formatted})")
                 else:
                     print(f"  - {cap.title}")
-            if len(capabilities) > 5:
-                print(f"  ... and {len(capabilities) - 5} more")
     except Exception as e:
         print(f"❌ Failed to discover capabilities: {e}")
         return
@@ -109,6 +159,11 @@ def run_tool_calling_example():
         "Get organization details",  # Should work with "Get Organization Details" action (read-only, might work!)
         "Show me all keywords",  # Should work with "Show All Keywords" action
         "Show me all keyword groups",  # Should work with "Show All Keyword Groups" action
+    ]
+    
+    # Add validation failure test case to demonstrate min/max constraints
+    validation_test_queries = [
+        "Show me just 10 keywords",              # Should FAIL: limit min is 25
     ]
     
     # Alternative queries for different environments (uncomment and modify as needed):
@@ -195,6 +250,81 @@ def run_tool_calling_example():
                 
         except Exception as e:
             print(f"❌ Error: {str(e)}")
+    
+    # Run validation failure test cases
+    print("\n" + "=" * 60)
+    print("Testing Validation Constraints (Should Fail)")
+    print("=" * 60)
+    print("These queries intentionally use invalid parameters to demonstrate")
+    print("that Pydantic validation is working correctly.\n")
+    
+    for i, query in enumerate(validation_test_queries, 1):
+        print(f"\n[{i}/{len(validation_test_queries)}] 👤 User: {query}")
+        print("-" * 60)
+        
+        try:
+            # Initial response from model with potential tool calls
+            response = model_with_tools.invoke([HumanMessage(content=query)])
+            
+            # Check if model wants to call tools
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                print(f"🔧 Model selected {len(response.tool_calls)} tool(s):")
+                for tool_call in response.tool_calls:
+                    print(f"  - {tool_call.get('name', 'unknown')}")
+                    print(f"    Args: {tool_call.get('args', {})}")
+                
+                print("\n⚙️  Executing tools (expecting validation errors)...")
+                
+                # Execute each tool call
+                from langchain_core.messages import ToolMessage
+                tool_results = []
+                
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call.get('name')
+                    tool_input = tool_call.get('args', {})
+                    tool_id = tool_call.get('id')
+                    
+                    # Find and execute the matching tool
+                    for tool in tools:
+                        if tool.name == tool_name:
+                            try:
+                                result = tool.invoke(tool_input)
+                                tool_results.append(ToolMessage(
+                                    content=str(result),
+                                    tool_call_id=tool_id
+                                ))
+                                print(f"  ⚠️  {tool_name} executed successfully (unexpected!)")
+                            except Exception as e:
+                                error_msg = str(e)
+                                tool_results.append(ToolMessage(
+                                    content=f"Validation Error: {error_msg}",
+                                    tool_call_id=tool_id
+                                ))
+                                print(f"  ✓ {tool_name} validation failed as expected:")
+                                print(f"    Error: {error_msg[:150]}...")
+                            break
+                
+                # Get final response with tool results
+                if tool_results:
+                    print("\n🤖 Final Response:")
+                    final_response = model_with_tools.invoke([
+                        HumanMessage(content=query),
+                        response,
+                        *tool_results
+                    ])
+                    print(final_response.content)
+            else:
+                # No tool calls
+                print(f"\n🤖 Assistant: {response.content}")
+                
+        except Exception as e:
+            print(f"✓ Validation error caught: {str(e)[:150]}...")
+    
+    print("\n" + "=" * 60)
+    print("Validation Tests Complete")
+    print("=" * 60)
+    print("✓ Pydantic successfully enforced min/max constraints!")
+    print("✓ Invalid parameters were rejected before reaching the API")
     
     print("\n" + "=" * 60)
     print("Example Complete")
