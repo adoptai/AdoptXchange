@@ -1,7 +1,9 @@
 """Factory for dynamically creating LangChain tools from Adopt capabilities."""
 
+import json
 from langchain_core.tools import tool, ToolException
-from typing import Dict, Any, List, Callable
+from typing import Dict, Any, List, Callable, Optional, Type
+from pydantic import BaseModel, Field, create_model
 from examples.models import AdoptAction
 from examples.action_api_samples.api_sample import run_action_by_id
 
@@ -30,12 +32,143 @@ def sanitize_tool_name(title: str) -> str:
     return name
 
 
+def parse_required_input(input_str: str) -> Dict[str, Dict[str, Any]]:
+    """Parse a required_input JSON string into parameter metadata.
+    
+    Handles the new format with type and definition fields:
+    '{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}'
+    
+    Args:
+        input_str: JSON string containing parameter name and metadata
+        
+    Returns:
+        Dictionary mapping parameter name to its metadata (type, default, definition, min, max, etc.)
+        Returns empty dict if parsing fails
+        
+    Examples:
+        >>> parse_required_input('{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}')
+        {'org_id': {'default': 3919, 'type': 'int', 'definition': 'organization id'}}
+        
+        >>> parse_required_input('{"limit": {"min": 25, "max": 100, "default": 50, "type": "int"}}')
+        {'limit': {'min': 25, 'max': 100, 'default': 50, 'type': 'int'}}
+    """
+    try:
+        parsed = json.loads(input_str)
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+    except (json.JSONDecodeError, TypeError):
+        # If it's not valid JSON, it's probably a simple string parameter
+        # This is expected for the hybrid format - no warning needed
+        return {}
+
+
+def create_tool_schema(capability: AdoptAction) -> Optional[Type[BaseModel]]:
+    """Create a dynamic Pydantic schema for a tool based on its required_inputs.
+    
+    Parses required_inputs and generates a Pydantic model. New format includes:
+    - type: "int", "string", "float", "bool"
+    - definition: description of the parameter
+    - default: optional default value
+    - min, max: optional constraints
+    
+    Args:
+        capability: The Adopt action to create a schema for
+        
+    Returns:
+        A Pydantic BaseModel class with fields for each required input,
+        or None if there are no required inputs
+        
+    Examples:
+        For capability with required_inputs:
+        ['{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}']
+        
+        Generates equivalent to:
+        class ToolSchema(BaseModel):
+            org_id: int = Field(default=3919, description="organization id")
+    """
+    if not capability.required_inputs:
+        return None
+    
+    # Type mapping from string to Python types
+    type_mapping = {
+        'int': int,
+        'integer': int,
+        'str': str,
+        'string': str,
+        'float': float,
+        'double': float,
+        'bool': bool,
+        'boolean': bool,
+    }
+    
+    field_definitions = {}
+    
+    for input_str in capability.required_inputs:
+        param_dict = parse_required_input(input_str)
+        
+        if param_dict:
+            # Structured JSON format with type and definition
+            for param_name, param_meta in param_dict.items():
+                # Extract metadata
+                type_str = param_meta.get('type', 'string').lower()
+                default_value = param_meta.get('default')
+                min_value = param_meta.get('min')
+                max_value = param_meta.get('max')
+                definition = param_meta.get('definition', f"{param_name} parameter")
+                
+                # Map string type to Python type
+                param_type = type_mapping.get(type_str, str)
+                
+                # Determine if mandatory or optional
+                has_default = 'default' in param_meta
+                mandatory_status = "(optional)" if has_default else "(mandatory)"
+                
+                # Add mandatory/optional status to description
+                enhanced_description = f"{definition} {mandatory_status}"
+                
+                # Build Field constraints
+                field_kwargs = {'description': enhanced_description}
+                
+                if min_value is not None and param_type in (int, float):
+                    field_kwargs['ge'] = min_value  # greater than or equal
+                if max_value is not None and param_type in (int, float):
+                    field_kwargs['le'] = max_value  # less than or equal
+                
+                # Handle default value
+                if default_value is not None:
+                    field_kwargs['default'] = default_value
+                # If no default, field is required - Pydantic handles this automatically
+                
+                # Create the field
+                field_definitions[param_name] = (param_type, Field(**field_kwargs))
+        else:
+            # Simple string format - treat as required string parameter
+            param_name = input_str.strip()
+            if param_name:  # Ensure it's not empty
+                field_definitions[param_name] = (
+                    str, 
+                    Field(description=f"{param_name} parameter (mandatory)")
+                )
+    
+    if not field_definitions:
+        return None
+    
+    # Create dynamic Pydantic model
+    schema_name = f"{sanitize_tool_name(capability.title)}_schema"
+    return create_model(
+        schema_name,
+        **field_definitions
+    )
+
+
 def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Callable:
     """Dynamically create a LangChain tool for an Adopt capability.
     
     This function creates a closure that captures the capability and profile,
     and returns a LangChain @tool decorated function that can be bound to
-    a language model.
+    a language model. If the capability has required_inputs with metadata,
+    a Pydantic schema is automatically generated for validation.
     
     Args:
         capability: The Adopt action to create a tool for
@@ -47,10 +180,8 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
     tool_name = sanitize_tool_name(capability.title)
     tool_description = capability.description
     
-    # Add required inputs to description if any
-    if capability.required_inputs:
-        inputs_desc = ", ".join(capability.required_inputs)
-        tool_description += f"\n\nRequired inputs: {inputs_desc}"
+    # Create dynamic Pydantic schema if we have required inputs with metadata
+    tool_schema = create_tool_schema(capability)
     
     # Create the inner function that will be decorated
     # Use **kwargs to accept any parameters the LLM might provide
@@ -74,26 +205,27 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
             # Extract user_input and other params
             user_input = actual_kwargs.get('user_input', '')
             
-            # For actions with required_inputs, extract them as workflow_params
+            # Extract workflow_params from the validated input
+            # Pydantic has already validated these if we have a schema
             workflow_params = {}
             if capability.required_inputs:
-                # Validate that all required inputs are provided
-                missing_inputs = [
-                    req_input for req_input in capability.required_inputs 
-                    if req_input not in actual_kwargs
-                ]
+                # Parse required_inputs to get parameter metadata
+                param_info = {}
+                for input_str in capability.required_inputs:
+                    param_dict = parse_required_input(input_str)
+                    for param_name, param_meta in param_dict.items():
+                        param_info[param_name] = param_meta
                 
-                if missing_inputs:
-                    # Raise clear error about missing required parameters
-                    missing_str = ", ".join(missing_inputs)
-                    raise ToolException(
-                        f"Missing required parameters for '{capability.title}': {missing_str}. "
-                        f"Please provide: {', '.join(capability.required_inputs)}"
-                    )
-                
-                # Extract all required inputs as workflow_params
-                for req_input in capability.required_inputs:
-                    workflow_params[req_input] = actual_kwargs[req_input]
+                # Extract all parameters that match required input names
+                # Include defaults if parameter not provided by LLM
+                for param_name, param_meta in param_info.items():
+                    if param_name in actual_kwargs:
+                        # Use the value provided by LLM
+                        workflow_params[param_name] = actual_kwargs[param_name]
+                    elif 'default' in param_meta:
+                        # Use the default value if parameter not provided
+                        # (this handles empty strings, 0, False, etc. correctly)
+                        workflow_params[param_name] = param_meta['default']
                 
                 # Use generic message if only params are provided
                 if not user_input:
@@ -121,8 +253,11 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
     tool_func.__name__ = tool_name
     tool_func.__doc__ = tool_description
     
-    # Apply the tool decorator
-    adopt_tool = tool(tool_func)
+    # Apply the tool decorator with optional schema
+    if tool_schema:
+        adopt_tool = tool(args_schema=tool_schema)(tool_func)
+    else:
+        adopt_tool = tool(tool_func)
     
     return adopt_tool
 
