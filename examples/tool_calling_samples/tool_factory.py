@@ -35,18 +35,22 @@ def sanitize_tool_name(title: str) -> str:
 def parse_required_input(input_str: str) -> Dict[str, Dict[str, Any]]:
     """Parse a required_input JSON string into parameter metadata.
     
-    Handles strings like: '{"limit": {"min": 25, "max": 100, "default": 50}}'
+    Handles the new format with type and definition fields:
+    '{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}'
     
     Args:
         input_str: JSON string containing parameter name and metadata
         
     Returns:
-        Dictionary mapping parameter name to its metadata (min, max, default, etc.)
+        Dictionary mapping parameter name to its metadata (type, default, definition, min, max, etc.)
         Returns empty dict if parsing fails
         
     Examples:
-        >>> parse_required_input('{"limit": {"min": 25, "max": 100, "default": 50}}')
-        {'limit': {'min': 25, 'max': 100, 'default': 50}}
+        >>> parse_required_input('{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}')
+        {'org_id': {'default': 3919, 'type': 'int', 'definition': 'organization id'}}
+        
+        >>> parse_required_input('{"limit": {"min": 25, "max": 100, "default": 50, "type": "int"}}')
+        {'limit': {'min': 25, 'max': 100, 'default': 50, 'type': 'int'}}
     """
     try:
         parsed = json.loads(input_str)
@@ -62,9 +66,11 @@ def parse_required_input(input_str: str) -> Dict[str, Dict[str, Any]]:
 def create_tool_schema(capability: AdoptAction) -> Optional[Type[BaseModel]]:
     """Create a dynamic Pydantic schema for a tool based on its required_inputs.
     
-    Parses required_inputs and generates a Pydantic model. Supports two formats:
-    1. Structured JSON: '{"limit": {"min": 25, "max": 100, "default": 50}}'
-    2. Simple strings: 'keyword_id' (treated as required string parameter)
+    Parses required_inputs and generates a Pydantic model. New format includes:
+    - type: "int", "string", "float", "bool"
+    - definition: description of the parameter
+    - default: optional default value
+    - min, max: optional constraints
     
     Args:
         capability: The Adopt action to create a schema for
@@ -75,14 +81,26 @@ def create_tool_schema(capability: AdoptAction) -> Optional[Type[BaseModel]]:
         
     Examples:
         For capability with required_inputs:
-        ['{"limit": {"min": 25, "max": 100, "default": 50}}']
+        ['{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}']
         
         Generates equivalent to:
         class ToolSchema(BaseModel):
-            limit: int = Field(default=50, ge=25, le=100, description="limit parameter")
+            org_id: int = Field(default=3919, description="organization id")
     """
     if not capability.required_inputs:
         return None
+    
+    # Type mapping from string to Python types
+    type_mapping = {
+        'int': int,
+        'integer': int,
+        'str': str,
+        'string': str,
+        'float': float,
+        'double': float,
+        'bool': bool,
+        'boolean': bool,
+    }
     
     field_definitions = {}
     
@@ -90,27 +108,27 @@ def create_tool_schema(capability: AdoptAction) -> Optional[Type[BaseModel]]:
         param_dict = parse_required_input(input_str)
         
         if param_dict:
-            # Structured JSON format
+            # Structured JSON format with type and definition
             for param_name, param_meta in param_dict.items():
                 # Extract metadata
+                type_str = param_meta.get('type', 'string').lower()
                 default_value = param_meta.get('default')
                 min_value = param_meta.get('min')
                 max_value = param_meta.get('max')
-                description = param_meta.get('description', f"{param_name} parameter")
+                definition = param_meta.get('definition', f"{param_name} parameter")
                 
-                # Infer type from default value
-                if default_value is not None:
-                    param_type = type(default_value)
-                elif min_value is not None:
-                    param_type = type(min_value)
-                elif max_value is not None:
-                    param_type = type(max_value)
-                else:
-                    # Default to string if we can't infer
-                    param_type = str
+                # Map string type to Python type
+                param_type = type_mapping.get(type_str, str)
+                
+                # Determine if mandatory or optional
+                has_default = 'default' in param_meta
+                mandatory_status = "(optional)" if has_default else "(mandatory)"
+                
+                # Add mandatory/optional status to description
+                enhanced_description = f"{definition} {mandatory_status}"
                 
                 # Build Field constraints
-                field_kwargs = {'description': description}
+                field_kwargs = {'description': enhanced_description}
                 
                 if min_value is not None and param_type in (int, float):
                     field_kwargs['ge'] = min_value  # greater than or equal
@@ -130,7 +148,7 @@ def create_tool_schema(capability: AdoptAction) -> Optional[Type[BaseModel]]:
             if param_name:  # Ensure it's not empty
                 field_definitions[param_name] = (
                     str, 
-                    Field(description=f"{param_name} parameter")
+                    Field(description=f"{param_name} parameter (mandatory)")
                 )
     
     if not field_definitions:
@@ -191,16 +209,23 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
             # Pydantic has already validated these if we have a schema
             workflow_params = {}
             if capability.required_inputs:
-                # Parse required_inputs to get parameter names
-                param_names = set()
+                # Parse required_inputs to get parameter metadata
+                param_info = {}
                 for input_str in capability.required_inputs:
                     param_dict = parse_required_input(input_str)
-                    param_names.update(param_dict.keys())
+                    for param_name, param_meta in param_dict.items():
+                        param_info[param_name] = param_meta
                 
                 # Extract all parameters that match required input names
-                for param_name in param_names:
+                # Include defaults if parameter not provided by LLM
+                for param_name, param_meta in param_info.items():
                     if param_name in actual_kwargs:
+                        # Use the value provided by LLM
                         workflow_params[param_name] = actual_kwargs[param_name]
+                    elif 'default' in param_meta:
+                        # Use the default value if parameter not provided
+                        # (this handles empty strings, 0, False, etc. correctly)
+                        workflow_params[param_name] = param_meta['default']
                 
                 # Use generic message if only params are provided
                 if not user_input:

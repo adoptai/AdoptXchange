@@ -19,22 +19,26 @@ from examples.tool_calling_samples.tool_factory import create_all_tools
 def format_param_details(required_inputs):
     """Format required_inputs metadata for display.
     
-    Supports two formats:
-    1. Structured JSON: '{"limit": {"min": 25, "max": 100, "default": 50}}'
-    2. Simple strings: 'keyword_id'
+    New format with type and definition:
+    '{"org_id": {"default": 3919, "type": "int", "definition": "organization id"}}'
+    
+    Shows (mandatory) or (optional) based on presence of default value.
     
     Args:
-        required_inputs: List of strings (JSON or plain) with parameter metadata
+        required_inputs: List of JSON strings with parameter metadata
         
     Returns:
-        Formatted string showing parameter names with constraints
+        Formatted string showing parameter names with type, constraints, and mandatory/optional status
         
     Examples:
-        ['{"limit": {"min": 25, "max": 100, "default": 50}}'] 
-        -> "limit [25-100, default=50]"
+        ['{"org_id": {"default": 3919, "type": "int"}}'] 
+        -> "org_id: int (optional) [default=3919]"
         
-        ['keyword_id', 'group_id']
-        -> "keyword_id, group_id"
+        ['{"keyword_id": {"type": "int"}}']
+        -> "keyword_id: int (mandatory)"
+        
+        ['{"limit": {"min": 25, "max": 100, "default": 50, "type": "int"}}']
+        -> "limit: int (optional) [25-100, default=50]"
     """
     if not required_inputs:
         return ""
@@ -45,7 +49,14 @@ def format_param_details(required_inputs):
             param_dict = json.loads(input_str)
             # Structured JSON format
             for param_name, param_meta in param_dict.items():
+                param_type = param_meta.get('type', 'string')
+                has_default = 'default' in param_meta
+                
+                # Determine if mandatory or optional
+                mandatory_status = "(optional)" if has_default else "(mandatory)"
+                
                 details = []
+                
                 if 'min' in param_meta and 'max' in param_meta:
                     details.append(f"{param_meta['min']}-{param_meta['max']}")
                 elif 'min' in param_meta:
@@ -56,13 +67,14 @@ def format_param_details(required_inputs):
                 if 'default' in param_meta:
                     details.append(f"default={param_meta['default']}")
                 
+                type_str = f"{param_name}: {param_type} {mandatory_status}"
                 if details:
-                    param_strs.append(f"{param_name} [{', '.join(details)}]")
+                    param_strs.append(f"{type_str} [{', '.join(details)}]")
                 else:
-                    param_strs.append(param_name)
+                    param_strs.append(type_str)
         except (json.JSONDecodeError, TypeError):
-            # Simple string format - just use the parameter name
-            param_strs.append(input_str.strip())
+            # Simple string format - just use the parameter name (assume mandatory)
+            param_strs.append(f"{input_str.strip()} (mandatory)")
     
     return ", ".join(param_strs)
 
@@ -124,12 +136,49 @@ def run_tool_calling_example():
         # Show all discovered capabilities
         if capabilities:
             print("\nDiscovered capabilities:")
-            for cap in capabilities:
+            for i, cap in enumerate(capabilities, 1):
+                print(f"\n  {i}. {cap.title}")
                 if cap.required_inputs:
-                    params_formatted = format_param_details(cap.required_inputs)
-                    print(f"  - {cap.title} (requires: {params_formatted})")
+                    print(f"     Parameters:")
+                    # Parse and display each parameter on its own line
+                    for input_str in cap.required_inputs:
+                        try:
+                            param_dict = json.loads(input_str)
+                            for param_name, param_meta in param_dict.items():
+                                param_type = param_meta.get('type', 'string')
+                                has_default = 'default' in param_meta
+                                mandatory_status = "optional" if has_default else "mandatory"
+                                
+                                # Build constraint info
+                                constraints = []
+                                if 'min' in param_meta and 'max' in param_meta:
+                                    constraints.append(f"range: {param_meta['min']}-{param_meta['max']}")
+                                elif 'min' in param_meta:
+                                    constraints.append(f"min: {param_meta['min']}")
+                                elif 'max' in param_meta:
+                                    constraints.append(f"max: {param_meta['max']}")
+                                
+                                if 'default' in param_meta:
+                                    default_val = param_meta['default']
+                                    # Format empty string defaults nicely
+                                    if default_val == "":
+                                        default_val = '""'
+                                    constraints.append(f"default: {default_val}")
+                                
+                                constraint_str = f" [{', '.join(constraints)}]" if constraints else ""
+                                print(f"       • {param_name}: {param_type} ({mandatory_status}){constraint_str}")
+                                
+                                # Optionally show definition on next line if it exists
+                                if 'definition' in param_meta and param_meta['definition']:
+                                    definition = param_meta['definition']
+                                    if len(definition) > 60:
+                                        definition = definition[:57] + "..."
+                                    print(f"         → {definition}")
+                        except (json.JSONDecodeError, TypeError):
+                            # Simple string format
+                            print(f"       • {input_str.strip()} (mandatory)")
                 else:
-                    print(f"  - {cap.title}")
+                    print(f"     No parameters required")
     except Exception as e:
         print(f"❌ Failed to discover capabilities: {e}")
         return

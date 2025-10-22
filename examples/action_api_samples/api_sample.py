@@ -341,7 +341,7 @@ def run_action_by_id(
     request_payload = {
         "messages": [message.model_dump()],
         "action_id": action_id,
-        "execution_type": "DEFAULT",
+        "execution_type": "TOOL",
         "base_url": profile.get("base_url", ""),
         "application_base_url": profile.get("application_base_url", ""),
         "workflow_params": combined_workflow_params,
