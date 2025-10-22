@@ -53,9 +53,9 @@ def parse_required_input(input_str: str) -> Dict[str, Dict[str, Any]]:
         if isinstance(parsed, dict):
             return parsed
         return {}
-    except (json.JSONDecodeError, TypeError) as e:
-        # If it's not valid JSON, log and return empty
-        print(f"Warning: Could not parse required_input '{input_str}': {e}")
+    except (json.JSONDecodeError, TypeError):
+        # If it's not valid JSON, it's probably a simple string parameter
+        # This is expected for the hybrid format - no warning needed
         return {}
 
 
