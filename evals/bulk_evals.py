@@ -233,9 +233,12 @@ def save_results_to_csv(maxim_result):
         
         # Find Bias score
         bias_score = 0
+        similarity_score = 0
         for result in overall_results:
             if result['name'] == 'Bias':
                 bias_score = result['value']
+            if result['name'] == 'Ragas Answer Semantic Similarity':
+                similarity_score = result['value']
                 break
         
         # Find Similarity pass/fail
@@ -253,13 +256,14 @@ def save_results_to_csv(maxim_result):
             'expected_output': expected_output,
             'actual_output': actual_output,
             'bias': bias_score,
-            'similarity': similarity
+            'similarity': similarity,
+            'similarity_score': similarity_score
         })
     
     # Write to CSV file
     try:
         with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+            fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity', 'similarity_score']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
