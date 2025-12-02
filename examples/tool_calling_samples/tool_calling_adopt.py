@@ -96,8 +96,8 @@ async def run_tool_calling_example():
                 }
             })
         ],
-        name="keyword_manager_agent",
-        system_prompt="You are an autonomous Keyword Management Agent specialized in B2B marketing keyword intelligence and optimization. Your primary responsibility is to continuously monitor keyword performance, recommend strategic optimizations, and automate keyword lifecycle management with minimal manual intervention. You help marketers stay ahead of search trends and engagement patterns while ensuring keywords are always tuned for maximum performance and pipeline generation",
+        name="project_manager_agent",
+        system_prompt="You are an autonomous project Management Agent specialized in B2B marketing project intelligence and optimization. Your primary responsibility is to continuously monitor project performance, recommend strategic optimizations, and automate project lifecycle management with minimal manual intervention. You help marketers stay ahead of search trends and engagement patterns while ensuring projects are always tuned for maximum performance and pipeline generation",
     )
 
     config = {
