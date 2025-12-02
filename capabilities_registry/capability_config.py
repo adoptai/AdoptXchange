@@ -1,0 +1,23 @@
+#this is duplicate data copy actual data
+CAPABILITY_KEY_TO_ID = {
+    "manage_user_profiles": "b8a1f3c5-41b2-4f76-8c11-8b9b1b4c2b7e",
+    "update_billing_information": "bb3c77e1-2d5d-4ba9-9e1c-82b0e1aab2c4",
+    "fetch_recent_notifications": "c1f5f9a2-6a0e-4d3a-a734-bf2d2e7b0c61",
+    "generate_monthly_report": "d7a9b52a-357e-4e13-b6cd-3f7d2a3fe9b4",
+    "create_new_project": "e4c3f189-b274-4a9d-b937-4aa88c937e21",
+    "archive_completed_tasks": "fa914c63-6b0a-4513-9c2f-5e7cb9ac1d09",
+    "list_all_projects": "0f97fd95-cb81-4dcd-a6d5-9dc8a3a227d3",
+    "get_project_activity_feed": "1c25a4cf-57b7-4b37-9ff9-42c158baa4f7",
+    "search_project_by_name": "2977c695-685c-4c5f-a3e5-6b2c8f7d3f18",
+    "get_current_user_profile": "3a9a0a2e-b049-4c6a-9c2b-17f84b6cd2f1",
+    "update_user_preferences": "4bc0c51b-dc9f-4e3d-a7d4-3ebc8b9f921b",
+    "get_team_members_list": "5f2c0f3c-3180-4ad1-8c2a-9bb9c5a3b912",
+    "invite_user_to_team": "6d8a7127-9d02-4f81-a9a2-a464ba1ee6e9",
+    "remove_user_from_team": "7ee4f829-4f63-4d92-a6c8-11c14e3e8d7f",
+    "get_system_health_status": "8a557a3b-ffaa-4c96-861b-34cf4d91a60e",
+    "export_data_as_csv": "92c0a898-3dd3-4e01-9d23-7c1bf2c7c54a",
+    "import_data_from_csv": "a01f98f3-d0b5-4a1d-8b4b-4b6d439bb8d9",
+    "schedule_background_job": "ae83dab5-78c2-4d2e-94b5-5b7f6a67c3de",
+    "get_audit_log_entries": "b94a1ff0-3df2-4ed4-b3b2-0f4d2f0d93f8",
+    "rotate_api_credentials": "c5f0f2f7-94d0-412b-88f6-ccd2fb03a75f",
+}

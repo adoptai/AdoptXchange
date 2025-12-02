@@ -14,9 +14,11 @@ class AdoptEnv(BaseModel):
     AWS_SECRET_ACCESS_KEY: Optional[str] = Field(default=None, description="AWS Secret Access Key for Bedrock")
     AWS_ACCESS_KEY_ID: Optional[str] = Field(default=None, description="AWS Access Key ID for Bedrock")
     AWS_REGION: Optional[str] = Field(default="us-east-1", description="AWS Region for Bedrock")
-    BEDROCK_MODEL: Optional[str] = Field(default="us.anthropic.claude-4-sonnet-20250514-v1:0", description="Bedrock model to use")
+    BEDROCK_MODEL: Optional[str] = Field(default="us.anthropic.claude-3-5-haiku-20241022-v1:0", description="Bedrock model to use")
     MAXIM_API_KEY: Optional[str] = Field(default=None, description="Maxim API Key for evaluation platform")
     MAXIM_WORKSPACE_ID: Optional[str] = Field(default=None, description="Maxim Workspace ID for storing evaluation results")
+    ADOPT_TIMEOUT_SECONDS: Optional[int] = Field(default=30, description="Timeout for Adopt API requests")
+    OPENAI_API_KEY: Optional[str] = Field(default="", description="OpenAI API Key for OpenAI models")
 
 def read_env() -> AdoptEnv:
     """Read the environment variables from .env files"""
