@@ -92,7 +92,7 @@ async def run_tool_calling_example():
             }),
             MiddlewareSpec("human_in_the_loop", {
                 "interrupt_on": {
-                    "add_new_keywords": True,
+                    "create_new_project": True,
                 }
             })
         ],
