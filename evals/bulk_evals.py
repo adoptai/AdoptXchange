@@ -8,6 +8,7 @@ import ast
 import requests
 import argparse
 from typing import List, Any, Dict, Union
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from maxim import maxim
 from maxim.models import YieldedOutput
 from examples import read_env
@@ -88,7 +89,7 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
 default_csv_file_path = "evals/test_data.csv"
 
 
-def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None):
+def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None):
     """Function to call your local agent endpoint using Adopt API
     
     Args:
@@ -96,10 +97,24 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         profile: Adopt profile configuration
         access_token: Authentication token
         exclude_fields: List of field names to exclude from the response
+        timeout: Optional timeout in seconds. If the call takes longer, returns "timed out"
     """
     try:
-        # Call the actual Adopt API using the simpler run_simple_action function
-        response = run_simple_action(data["input"], profile, access_token)
+        # If timeout is specified, wrap the call in a ThreadPoolExecutor with timeout
+        if timeout is not None and timeout > 0:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_simple_action, data["input"], profile, access_token)
+                try:
+                    response = future.result(timeout=timeout)
+                except FutureTimeoutError:
+                    # Timeout occurred, return "timed out" as the response
+                    return YieldedOutput(
+                        data="timed out",
+                        retrieved_context_to_evaluate=data.get("context", ""),
+                    )
+        else:
+            # No timeout specified, call directly
+            response = run_simple_action(data["input"], profile, access_token)
 
         # Parse the response if it's a string representation of a list
         try:
@@ -291,6 +306,12 @@ Examples:
   
   # Use custom CSV file with field exclusion
   python evals/bulk_evals.py --csv-file path/to/data.csv --exclude-fields id,timestamp
+  
+  # Set timeout limit (30 seconds)
+  python evals/bulk_evals.py --timeout 30.0
+  
+  # Combine options: timeout and field exclusion
+  python evals/bulk_evals.py --timeout 30.0 --exclude-fields header_message,footer_message
         """
     )
     
@@ -306,6 +327,13 @@ Examples:
         type=str,
         default='',
         help='Comma-separated list of field names to exclude from response (e.g., header_message,footer_message,id)'
+    )
+    
+    parser.add_argument(
+        '--timeout',
+        type=float,
+        default=None,
+        help='Timeout in seconds for LLM responses. If exceeded, actual_output will be "timed out" (e.g., 30.0)'
     )
     
     args = parser.parse_args()
@@ -331,6 +359,11 @@ Examples:
         print(f"Excluding fields from response: {', '.join(exclude_fields)}")
     else:
         print("No field exclusion applied")
+    
+    if args.timeout is not None:
+        print(f"Timeout set to {args.timeout} seconds for LLM responses")
+    else:
+        print("No timeout limit set for LLM responses")
 
     # Load the adopt profile configuration once
     profile = load_adopt_profile()
@@ -341,9 +374,9 @@ Examples:
     print("Authentication token obtained successfully")
     
     try:
-        # Create a wrapper function for Maxim that includes the profile, token, and exclude fields
+        # Create a wrapper function for Maxim that includes the profile, token, exclude fields, and timeout
         def call_local_agent_with_profile(data):
-            return call_local_agent(data, profile, access_token, exclude_fields)
+            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout)
         
         result = (
             maxim_client.create_test_run(
