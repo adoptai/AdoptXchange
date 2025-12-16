@@ -89,7 +89,7 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
 default_csv_file_path = "evals/test_data.csv"
 
 
-def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None):
+def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None, max_items: int = None):
     """Function to call your local agent endpoint using Adopt API
     
     Args:
@@ -98,12 +98,19 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         access_token: Authentication token
         exclude_fields: List of field names to exclude from the response
         timeout: Optional timeout in seconds. If the call takes longer, returns "timed out"
+        max_items: Optional maximum number of items to keep in arrays/lists (e.g., 5 for first 5 items)
     """
     try:
+        # Modify the input to include max_items instruction if specified
+        modified_input = data["input"]
+        if max_items is not None and max_items > 0:
+            # Append instruction to limit results in the prompt
+            modified_input = f"{data['input']}\n\nPlease limit your response to only the first {max_items} items if returning a list, table, or array of results."
+        
         # If timeout is specified, wrap the call in a ThreadPoolExecutor with timeout
         if timeout is not None and timeout > 0:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(run_simple_action, data["input"], profile, access_token)
+                future = executor.submit(run_simple_action, modified_input, profile, access_token)
                 try:
                     response = future.result(timeout=timeout)
                 except FutureTimeoutError:
@@ -114,7 +121,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
                     )
         else:
             # No timeout specified, call directly
-            response = run_simple_action(data["input"], profile, access_token)
+            response = run_simple_action(modified_input, profile, access_token)
 
         # Parse the response if it's a string representation of a list
         try:
@@ -310,8 +317,11 @@ Examples:
   # Set timeout limit (30 seconds)
   python evals/bulk_evals.py --timeout 30.0
   
-  # Combine options: timeout and field exclusion
-  python evals/bulk_evals.py --timeout 30.0 --exclude-fields header_message,footer_message
+  # Limit array/table items to first 5 items
+  python evals/bulk_evals.py --max-items 5
+  
+  # Combine options: timeout, field exclusion, and item limit
+  python evals/bulk_evals.py --timeout 30.0 --exclude-fields header_message,footer_message --max-items 5
         """
     )
     
@@ -334,6 +344,13 @@ Examples:
         type=float,
         default=None,
         help='Timeout in seconds for LLM responses. If exceeded, actual_output will be "timed out" (e.g., 30.0)'
+    )
+    
+    parser.add_argument(
+        '--max-items',
+        type=int,
+        default=None,
+        help='Maximum number of items to keep in arrays/lists from LLM response (e.g., 5 for first 5 items)'
     )
     
     args = parser.parse_args()
@@ -364,6 +381,11 @@ Examples:
         print(f"Timeout set to {args.timeout} seconds for LLM responses")
     else:
         print("No timeout limit set for LLM responses")
+    
+    if args.max_items is not None:
+        print(f"Array/table items limited to first {args.max_items} items")
+    else:
+        print("No limit on array/table items")
 
     # Load the adopt profile configuration once
     profile = load_adopt_profile()
@@ -374,9 +396,9 @@ Examples:
     print("Authentication token obtained successfully")
     
     try:
-        # Create a wrapper function for Maxim that includes the profile, token, exclude fields, and timeout
+        # Create a wrapper function for Maxim that includes the profile, token, exclude fields, timeout, and max_items
         def call_local_agent_with_profile(data):
-            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout)
+            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout, args.max_items)
         
         result = (
             maxim_client.create_test_run(
