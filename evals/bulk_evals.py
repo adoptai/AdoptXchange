@@ -3,17 +3,16 @@
 
 import os
 import pandas as pd
-import json
 import ast
 import requests
 import argparse
+import time
 from typing import List, Any, Dict, Union
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from maxim import maxim
 from maxim.models import YieldedOutput
 from examples import read_env
 from examples.action_api_samples.api_sample import run_simple_action, load_adopt_profile, get_auth_token
-from langchain_core.messages import HumanMessage
 
 # Get environment variables
 adopt_env = read_env()
@@ -76,12 +75,31 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
 
     # Convert to list of dictionaries
     test_data = []
+    skipped_count = 0
     for _, row in df.iterrows():
+        # Skip rows with empty Input or Expected_output
+        input_val = str(row["Input"]).strip()
+        expected_output_val = str(row["Expected_output"]).strip()
+        
+        if not input_val or input_val.lower() in ["nan", "none", ""]:
+            skipped_count += 1
+            print(f"Warning: Skipping row with empty Input: {row.get('Input', 'N/A')}")
+            continue
+            
+        if not expected_output_val or expected_output_val.lower() in ["nan", "none", ""]:
+            skipped_count += 1
+            print(f"Warning: Skipping row with empty Expected_output for input: {input_val[:50]}...")
+            continue
+        
         test_data.append({
-            "input": str(row["Input"]),
-            "expected_output": str(row["Expected_output"]),
+            "input": input_val,
+            "expected_output": expected_output_val,
             "context": "",  # Optional context column, default to empty
         })
+    
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} rows with empty Input or Expected_output")
+    
     return test_data
 
 
@@ -101,6 +119,22 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         max_items: Optional maximum number of items to keep in arrays/lists (e.g., 5 for first 5 items)
     """
     try:
+        # Ensure workflow_params has extractStructuredData as an object if it's expected
+        # This fixes the "Input extractStructuredData is not an object" error
+        workflow_params = profile.get("workflow_params", {})
+        if not isinstance(workflow_params, dict):
+            workflow_params = {}
+        # Ensure extractStructuredData is always an object (not null/undefined/string)
+        if "extractStructuredData" in workflow_params:
+            if not isinstance(workflow_params["extractStructuredData"], dict):
+                workflow_params["extractStructuredData"] = {}
+        else:
+            # Set it to an empty object if missing to prevent backend errors
+            workflow_params["extractStructuredData"] = {}
+        
+        # Create a modified profile with the fixed workflow_params
+        modified_profile = {**profile, "workflow_params": workflow_params}
+        
         # Modify the input to include max_items instruction if specified
         modified_input = data["input"]
         if max_items is not None and max_items > 0:
@@ -110,7 +144,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         # If timeout is specified, wrap the call in a ThreadPoolExecutor with timeout
         if timeout is not None and timeout > 0:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(run_simple_action, modified_input, profile, access_token)
+                future = executor.submit(run_simple_action, modified_input, modified_profile, access_token)
                 try:
                     response = future.result(timeout=timeout)
                 except FutureTimeoutError:
@@ -121,7 +155,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
                     )
         else:
             # No timeout specified, call directly
-            response = run_simple_action(modified_input, profile, access_token)
+            response = run_simple_action(modified_input, modified_profile, access_token)
 
         # Parse the response if it's a string representation of a list
         try:
@@ -180,6 +214,16 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
             retrieved_context_to_evaluate=data.get("context", ""),
         )
 
+    except ValueError as e:
+        # Handle API errors (400, 500, etc.) more gracefully
+        error_msg = str(e)
+        # Extract more detailed error information if available
+        if "extractStructuredData" in error_msg:
+            error_msg = f"API Error: Backend expects extractStructuredData to be an object. {error_msg}"
+        return YieldedOutput(
+            data=f"Error: {error_msg}",
+            retrieved_context_to_evaluate=data.get("context", ""),
+        )
     except Exception as e:
         # Return error information in YieldedOutput format
         return YieldedOutput(
@@ -210,14 +254,21 @@ def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
         return None
 
 
-def save_results_to_csv(maxim_result):
-    """Save evaluation results to CSV file"""
+def save_results_to_csv(maxim_result, csv_filename=None, append_mode=False):
+    """Save evaluation results to CSV file
+    
+    Args:
+        maxim_result: Result from Maxim test run
+        csv_filename: Optional filename. If None, generates timestamp-based name
+        append_mode: If True, appends to existing file. If False, creates new file.
+    """
     import csv
     from datetime import datetime
     
-    # Generate timestamp for unique filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_filename = f"evals/evaluation_results_{timestamp}.csv"
+    # Generate timestamp for unique filename if not provided
+    if csv_filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_filename = f"evals/evaluation_results_{timestamp}.csv"
     
     # Extract test run ID from the result link
     # Link format: https://app.getmaxim.ai/workspace/{workspace_id}/testrun/{test_run_id}
@@ -280,28 +331,34 @@ def save_results_to_csv(maxim_result):
     
     # Write to CSV file
     try:
-        with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        file_exists = os.path.exists(csv_filename) and append_mode
+        with open(csv_filename, 'a' if append_mode else 'w', newline='', encoding='utf-8') as csvfile:
             fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
-            writer.writeheader()
+            # Only write header if file is new or not in append mode
+            if not file_exists:
+                writer.writeheader()
+            
             writer.writerows(csv_data)
         
-        print(f"\n{'='*50}")
-        print("RESULTS SAVED TO CSV")
-        print(f"{'='*50}")
-        print(f"Results saved to: {csv_filename}")
-        print(f"Total records: {len(csv_data)}")
+        mode_str = "Appended to" if append_mode else "Saved to"
+        print(f"\n{mode_str}: {csv_filename}")
+        print(f"Records in this batch: {len(csv_data)}")
         
     except Exception as e:
         print(f"Failed to save results to CSV: {e}")
+    
+    return csv_filename
 
 
 def main():
-    """Main function to run bulk evaluations sequentially"""
+    """Main function to run bulk evaluations sequentially, one prompt at a time"""
+    from datetime import datetime
+    
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
-        description="Run bulk evaluations for AdoptXchange using Maxim",
+        description="Run bulk evaluations for AdoptXchange using Maxim (sequential processing)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -368,9 +425,10 @@ Examples:
     if not adopt_env.MAXIM_WORKSPACE_ID:
         raise ValueError("MAXIM_WORKSPACE_ID environment variable is required")
 
-    print("Starting bulk evaluation process...")
+    print("Starting bulk evaluation process (sequential mode)...")
     print(f"CSV file: {args.csv_file}")
     print(f"Loaded {len(test_data)} test cases from CSV")
+    print("Processing prompts one-by-one to avoid rate limits...")
     
     if exclude_fields:
         print(f"Excluding fields from response: {', '.join(exclude_fields)}")
@@ -395,34 +453,78 @@ Examples:
     access_token = get_auth_token()
     print("Authentication token obtained successfully")
     
+    # Generate CSV filename once for all results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f"evals/evaluation_results_{timestamp}.csv"
+    print(f"\nResults will be saved incrementally to: {csv_filename}")
+    
+    # Process each test case sequentially
+    successful_count = 0
+    failed_count = 0
+    
     try:
         # Create a wrapper function for Maxim that includes the profile, token, exclude fields, timeout, and max_items
         def call_local_agent_with_profile(data):
             return call_local_agent(data, profile, access_token, exclude_fields, args.timeout, args.max_items)
         
-        result = (
-            maxim_client.create_test_run(
-                name="Local Agent Endpoint Test", in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
-            )
-            .with_data_structure(
-                {
-                    "input": "INPUT",
-                    "expected_output": "EXPECTED_OUTPUT",
-                    "context": "CONTEXT_TO_EVALUATE",
-                }
-            )
-            .with_data(test_data)
-            .with_evaluators("Bias","Ragas Answer Semantic Similarity")
-            .yields_output(call_local_agent_with_profile)
-            .run()
-        )
-        print(f"Maxim test run completed! View results: {result}")
+        for idx, test_case in enumerate(test_data, 1):
+            print(f"\n{'='*60}")
+            print(f"Processing test case {idx}/{len(test_data)}")
+            print(f"{'='*60}")
+            print(f"Input: {test_case['input'][:100]}{'...' if len(test_case['input']) > 100 else ''}")
+            
+            try:
+                # Create a test run for this single test case
+                result = (
+                    maxim_client.create_test_run(
+                        name=f"Local Agent Endpoint Test - Case {idx}", 
+                        in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
+                    )
+                    .with_data_structure(
+                        {
+                            "input": "INPUT",
+                            "expected_output": "EXPECTED_OUTPUT",
+                            "context": "CONTEXT_TO_EVALUATE",
+                        }
+                    )
+                    .with_data([test_case])  # Single test case
+                    .with_evaluators("Bias","Ragas Answer Semantic Similarity")
+                    .yields_output(call_local_agent_with_profile)
+                    .run()
+                )
+                
+                print(f"Test case {idx} completed! View results: {result}")
+                
+                # Save results incrementally (append mode after first write)
+                save_results_to_csv(result, csv_filename=csv_filename, append_mode=(idx > 1))
+                
+                successful_count += 1
+                print(f"✓ Test case {idx} saved successfully")
+                
+                # Small delay between requests to avoid rate limits
+                if idx < len(test_data):
+                    print("Waiting 2 seconds before next test case...")
+                    time.sleep(2)
+                
+            except Exception as e:
+                failed_count += 1
+                print(f"✗ Failed to process test case {idx}: {e}")
+                # Continue with next test case
+                continue
         
-        # Extract results and save to CSV
-        save_results_to_csv(result)
+        print(f"\n{'='*60}")
+        print("BULK EVALUATION SUMMARY")
+        print(f"{'='*60}")
+        print(f"Total test cases: {len(test_data)}")
+        print(f"Successful: {successful_count}")
+        print(f"Failed: {failed_count}")
+        print(f"Final results saved to: {csv_filename}")
+        print(f"{'='*60}")
         
     except Exception as e:
         print(f"Failed to run Maxim evaluation: {e}")
+        print(f"Partial results may be available in: {csv_filename}")
+    
     print("Bulk evaluation process completed.")
 
 
