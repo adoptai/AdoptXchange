@@ -13,6 +13,12 @@ import time
 from typing import List, Any, Dict, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from contextlib import contextmanager
+
+# Auto-add project root to Python path so imports work from any directory
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from maxim import maxim
 from maxim.models import YieldedOutput
 from examples import read_env
@@ -105,6 +111,7 @@ def filter_json_fields(data: Union[Dict, List, Any], exclude_fields: List[str]) 
 def load_test_data_from_csv(csv_file_path: str) -> list:
     """
     Load test data from a CSV file with columns: Input, Expected_output
+    Skips blank rows and rows with empty Input or Expected_output.
 
     Args:
         csv_file_path: Path to the CSV file
@@ -115,8 +122,8 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
 
-    # Read CSV file
-    df = pd.read_csv(csv_file_path)
+    # Read CSV file, skip blank lines
+    df = pd.read_csv(csv_file_path, skip_blank_lines=True)
 
     # Validate required columns
     required_columns = ["Input", "Expected_output"]
@@ -124,12 +131,26 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     if missing_columns:
         raise ValueError(f"CSV file missing required columns: {missing_columns}")
 
+    # Drop rows with empty/NaN values in required columns
+    original_count = len(df)
+    df = df.dropna(subset=["Input", "Expected_output"])
+    
+    # Also drop rows where Input or Expected_output is just whitespace
+    df = df[df["Input"].astype(str).str.strip() != ""]
+    df = df[df["Expected_output"].astype(str).str.strip() != ""]
+    df = df[df["Input"].astype(str).str.lower() != "nan"]
+    df = df[df["Expected_output"].astype(str).str.lower() != "nan"]
+    
+    skipped_count = original_count - len(df)
+    if skipped_count > 0:
+        print(f"⚠️  Skipped {skipped_count} blank/invalid rows from CSV")
+
     # Convert to list of dictionaries
     test_data = []
     for _, row in df.iterrows():
         test_data.append({
-            "input": str(row["Input"]),
-            "expected_output": str(row["Expected_output"]),
+            "input": str(row["Input"]).strip(),
+            "expected_output": str(row["Expected_output"]).strip(),
             "context": "",  # Optional context column, default to empty
         })
     return test_data
@@ -159,7 +180,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         
         # If timeout is specified, wrap the call in a ThreadPoolExecutor with timeout
         if timeout is not None and timeout > 0:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 future = executor.submit(run_simple_action, modified_input, profile, access_token)
                 try:
                     response = future.result(timeout=timeout)
@@ -396,6 +417,284 @@ def send_all_results_to_maxim(
         return None
 
 
+def initialize_raw_csv(csv_filename: str) -> None:
+    """Initialize a new CSV file with headers for raw results (without Maxim scores).
+    
+    Args:
+        csv_filename: Path to the CSV file to create
+    """
+    import csv
+    
+    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+    
+    print(f"📄 Initialized raw results CSV: {csv_filename}")
+
+
+def append_batch_to_csv(
+    csv_filename: str,
+    batch_results: List[Tuple[Dict, YieldedOutput]]
+) -> None:
+    """Append batch results to the CSV file immediately after processing.
+    
+    Args:
+        csv_filename: Path to the CSV file
+        batch_results: List of (data, YieldedOutput) tuples from the batch
+    """
+    import csv
+    
+    with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        for data, output in batch_results:
+            # Escape newlines in actual output
+            actual_output = str(output.data).replace('\n', '\\n') if output.data else ""
+            
+            writer.writerow({
+                'input': data['input'],
+                'expected_output': data['expected_output'],
+                'actual_output': actual_output,
+                'bias': '',  # Will be filled by Maxim later
+                'similarity': ''  # Will be filled by Maxim later
+            })
+
+
+def send_batch_to_maxim_background(
+    batch_data: List[Dict],
+    batch_results: List[Tuple[Dict, YieldedOutput]],
+    batch_number: int
+) -> str:
+    """
+    Send a batch of results to Maxim for evaluation.
+    
+    Args:
+        batch_data: Original test data for this batch
+        batch_results: List of (data, YieldedOutput) tuples
+        batch_number: The batch number for naming
+    
+    Returns:
+        Test run ID if successful, None otherwise
+    """
+    # Create lookup for precomputed results
+    precomputed_results = {}
+    for data, output in batch_results:
+        precomputed_results[data["input"]] = output
+    
+    def get_precomputed_result(data):
+        input_key = data["input"]
+        if input_key in precomputed_results:
+            return precomputed_results[input_key]
+        else:
+            return YieldedOutput(
+                data="Error: Result not found in precomputed cache",
+                retrieved_context_to_evaluate=data.get("context", ""),
+            )
+    
+    try:
+        with suppress_maxim_logs():
+            result = (
+                maxim_client.create_test_run(
+                    name=f"Local Agent Endpoint Test - Batch {batch_number}", 
+                    in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
+                )
+                .with_data_structure(
+                    {
+                        "input": "INPUT",
+                        "expected_output": "EXPECTED_OUTPUT",
+                        "context": "CONTEXT_TO_EVALUATE",
+                    }
+                )
+                .with_data(batch_data)
+                .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
+                .yields_output(get_precomputed_result)
+                .run()
+            )
+        
+        if result is not None and result.test_run_result is not None:
+            test_run_id = result.test_run_result.link.split('/')[-1]
+            return test_run_id
+        else:
+            return None
+    except Exception as e:
+        print(f"  ⚠️  Maxim error for batch {batch_number}: {e}")
+        return None
+
+
+def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str]) -> str:
+    """Update the raw CSV file with Maxim evaluation scores.
+    
+    Args:
+        raw_csv_filename: Path to the raw CSV file (with empty bias/similarity)
+        test_run_ids: List of Maxim test run IDs to fetch scores from
+    
+    Returns:
+        Path to the final CSV file with scores
+    """
+    import csv
+    from datetime import datetime
+    
+    if not test_run_ids:
+        print("⚠️  No Maxim test runs to fetch scores from")
+        print(f"Raw results are still available in: {raw_csv_filename}")
+        return raw_csv_filename
+    
+    # Fetch all Maxim scores and create a lookup by input
+    scores_lookup = {}
+    total_entries_fetched = 0
+    
+    for test_run_id in test_run_ids:
+        if test_run_id is None:
+            continue
+        
+        print(f"  Fetching scores from test run: {test_run_id}")
+        
+        entries_response = fetch_test_run_entries(
+            test_run_id=test_run_id,
+            workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
+            api_key=adopt_env.MAXIM_API_KEY
+        )
+        
+        if not entries_response or 'data' not in entries_response:
+            print(f"    ⚠️  No data in response for {test_run_id}")
+            continue
+        
+        entries = entries_response['data']['entries']
+        print(f"    Found {len(entries)} entries")
+        total_entries_fetched += len(entries)
+        
+        for entry in entries:
+            input_text = entry['input']['payload']
+            
+            # Extract scores
+            stats = entry.get('stats', {})
+            overall_results = stats.get('overallEvaluatorMeanResult', [])
+            pass_fail_results = stats.get('overallPassFailResult', [])
+            
+            bias_score = 0
+            for result in overall_results:
+                if result['name'] == 'Bias':
+                    bias_score = result['value']
+                    break
+            
+            similarity = "no"
+            for result in pass_fail_results:
+                if result['name'] == 'Ragas Answer Semantic Similarity':
+                    similarity = "yes" if result['value']['pass'] else "no"
+                    break
+            
+            scores_lookup[input_text] = {
+                'bias': bias_score,
+                'similarity': similarity
+            }
+    
+    print(f"\n  Total entries fetched from Maxim: {total_entries_fetched}")
+    print(f"  Unique inputs in scores lookup: {len(scores_lookup)}")
+    
+    # Read the raw CSV and update with scores
+    updated_rows = []
+    matched_count = 0
+    unmatched_inputs = []
+    
+    with open(raw_csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            input_text = row['input']
+            if input_text in scores_lookup:
+                row['bias'] = scores_lookup[input_text]['bias']
+                row['similarity'] = scores_lookup[input_text]['similarity']
+                matched_count += 1
+            else:
+                # Try to find partial match for debugging
+                if len(unmatched_inputs) < 3:  # Only log first 3 unmatched
+                    unmatched_inputs.append(input_text[:50] + "..." if len(input_text) > 50 else input_text)
+            updated_rows.append(row)
+    
+    # Debug: show sample of lookup keys vs CSV inputs if no matches
+    if matched_count == 0 and scores_lookup:
+        print(f"\n  ⚠️  DEBUG: No matches found!")
+        print(f"  Sample Maxim input (first 80 chars): {list(scores_lookup.keys())[0][:80]}...")
+        if updated_rows:
+            print(f"  Sample CSV input (first 80 chars): {updated_rows[0]['input'][:80]}...")
+    
+    if unmatched_inputs:
+        print(f"  Unmatched CSV inputs (first 3): {unmatched_inputs}")
+    
+    # Write updated data back
+    with open(raw_csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(updated_rows)
+    
+    print(f"\n✓ Updated {matched_count}/{len(updated_rows)} rows with Maxim scores")
+    
+    return raw_csv_filename
+
+
+def load_existing_results_from_csv(csv_file_path: str) -> Tuple[List[Dict], List[Tuple[Dict, YieldedOutput]]]:
+    """
+    Load existing results from a CSV file that already has actual_output.
+    Used for --maxim-only mode.
+    
+    Args:
+        csv_file_path: Path to the CSV file with existing results
+        
+    Returns:
+        Tuple of (test_data, all_results) ready for Maxim evaluation
+    """
+    import csv
+    
+    if not os.path.exists(csv_file_path):
+        raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
+    
+    test_data = []
+    all_results = []
+    skipped = 0
+    
+    with open(csv_file_path, 'r', newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        
+        for row in reader:
+            input_text = row.get('input', '').strip()
+            expected_output = row.get('expected_output', '').strip()
+            actual_output = row.get('actual_output', '').strip()
+            
+            # Skip rows with missing data
+            if not input_text or not expected_output or not actual_output:
+                skipped += 1
+                continue
+            
+            # Skip rows where actual_output is an error
+            if actual_output.startswith('Error:'):
+                skipped += 1
+                continue
+            
+            data = {
+                "input": input_text,
+                "expected_output": expected_output,
+                "context": "",
+            }
+            
+            # Unescape newlines in actual_output (they were escaped when saving)
+            actual_output_unescaped = actual_output.replace('\\n', '\n')
+            
+            output = YieldedOutput(
+                data=actual_output_unescaped,
+                retrieved_context_to_evaluate="",
+            )
+            
+            test_data.append(data)
+            all_results.append((data, output))
+    
+    if skipped > 0:
+        print(f"⚠️  Skipped {skipped} rows with missing/error data")
+    
+    return test_data, all_results
+
+
 def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
     """Fetch individual test run entries from Maxim API"""
     url = "https://api.getmaxim.ai/v1/test-runs/entries"
@@ -587,20 +886,82 @@ Examples:
         help=f'Maximum retry attempts for 503/504 errors (default: {MAX_RETRY_ATTEMPTS})'
     )
     
+    parser.add_argument(
+        '--maxim-only',
+        type=str,
+        default=None,
+        metavar='CSV_FILE',
+        help='Skip batch processing and only run Maxim evaluation on an existing CSV file with actual_output already filled'
+    )
+    
     args = parser.parse_args()
     
-    # Parse exclude fields from comma-separated string
-    exclude_fields = [field.strip() for field in args.exclude_fields.split(',') if field.strip()]
-    
-    # Load test data from specified CSV file
-    test_data = load_test_data_from_csv(args.csv_file)
-    
-    # Check for MAXIM API key
+    # Check for MAXIM API key (always required)
     if not adopt_env.MAXIM_API_KEY:
         raise ValueError("MAXIM_API_KEY environment variable is required")
 
     if not adopt_env.MAXIM_WORKSPACE_ID:
         raise ValueError("MAXIM_WORKSPACE_ID environment variable is required")
+    
+    # ==================== MAXIM-ONLY MODE ====================
+    if args.maxim_only:
+        print("=" * 60)
+        print("🔬 MAXIM-ONLY MODE")
+        print("=" * 60)
+        print(f"Loading existing results from: {args.maxim_only}")
+        
+        maxim_start_time = time.time()
+        
+        try:
+            test_data, all_results = load_existing_results_from_csv(args.maxim_only)
+            print(f"✓ Loaded {len(all_results)} valid results for Maxim evaluation")
+            
+            if len(all_results) == 0:
+                print("❌ No valid results to evaluate. Exiting.")
+                return
+            
+            # Send to Maxim
+            print("\n📤 Sending to Maxim for evaluation...")
+            test_run_id = send_all_results_to_maxim(
+                test_data=test_data,
+                all_results=all_results
+            )
+            
+            maxim_time = time.time() - maxim_start_time
+            
+            if test_run_id:
+                # Generate output filename based on input filename
+                base_name = os.path.splitext(os.path.basename(args.maxim_only))[0]
+                output_file = os.path.join(
+                    os.path.dirname(args.maxim_only),
+                    f"{base_name}_with_scores.csv"
+                )
+                
+                # Update the original CSV with scores
+                print(f"\n📊 Updating CSV with Maxim scores...")
+                update_csv_with_maxim_scores(args.maxim_only, test_run_id)
+                
+                print("\n" + "=" * 60)
+                print("✅ MAXIM-ONLY MODE COMPLETE")
+                print("=" * 60)
+                print(f"⏱️  Maxim evaluation time: {maxim_time:.2f}s")
+                print(f"📄 Updated file: {args.maxim_only}")
+            else:
+                print("\n❌ Maxim evaluation failed. No scores added.")
+            
+        except FileNotFoundError as e:
+            print(f"❌ Error: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+        
+        return
+    
+    # ==================== NORMAL MODE ====================
+    # Parse exclude fields from comma-separated string
+    exclude_fields = [field.strip() for field in args.exclude_fields.split(',') if field.strip()]
+    
+    # Load test data from specified CSV file
+    test_data = load_test_data_from_csv(args.csv_file)
 
     print("Starting bulk evaluation process...")
     print(f"CSV file: {args.csv_file}")
@@ -649,11 +1010,18 @@ Examples:
         error_log: List[Dict] = []  # Track all errors
         batch_number = 0
         
+        # Initialize CSV file for raw results (saved immediately after each batch)
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        raw_csv_filename = f"evals/evaluation_results_{timestamp}.csv"
+        initialize_raw_csv(raw_csv_filename)
+        
         # Start overall timer
         overall_start_time = time.time()
         total_batch_time = 0.0
         
         # Phase 1: Process all prompts in batches (limiting parallel calls to your server)
+        # CSV is saved after each batch for resilience
         while pending_data:
             batch_number += 1
             
@@ -681,6 +1049,11 @@ Examples:
             batch_elapsed_time = time.time() - batch_start_time
             total_batch_time += batch_elapsed_time
             
+            # IMMEDIATELY save batch results to CSV (resilience!)
+            if batch_results:
+                append_batch_to_csv(raw_csv_filename, batch_results)
+                print(f"  💾 Saved {len(batch_results)} results to CSV")
+            
             # Collect successful results
             all_results.extend(batch_results)
             
@@ -699,12 +1072,18 @@ Examples:
         print(f"{'='*50}")
         print(f"Total prompts processed: {len(all_results)}")
         print(f"Total batch processing time: {total_batch_time:.2f}s")
+        print(f"Raw results saved to: {raw_csv_filename}")
         
-        # Phase 2: Send ALL results to Maxim in one single test run
+        # Phase 2: Send ALL results to Maxim in ONE call (faster than per-batch)
+        print(f"\n{'='*50}")
+        print(f"SENDING TO MAXIM FOR EVALUATION")
+        print(f"{'='*50}")
+        
+        maxim_start_time = time.time()
+        test_run_id = None
+        
         if all_results:
-            print("\nSending all results to Maxim for evaluation...")
-            
-            maxim_start_time = time.time()
+            print(f"Sending {len(all_results)} results to Maxim...")
             
             test_run_id = send_all_results_to_maxim(
                 test_data=test_data,
@@ -716,14 +1095,17 @@ Examples:
             if test_run_id:
                 print(f"✓ Results sent to Maxim (test run: {test_run_id})")
                 print(f"⏱️  Maxim evaluation time: {maxim_elapsed_time:.2f}s")
-                print("\nFetching evaluation results...")
-                save_results_to_csv_from_test_runs([test_run_id])
+                
+                # Phase 3: Update CSV with Maxim scores
+                print("\nUpdating CSV with Maxim evaluation scores...")
+                update_csv_with_maxim_scores(raw_csv_filename, [test_run_id])
+                print(f"\n📄 Final results saved to: {raw_csv_filename}")
             else:
-                print("\n⚠️  Failed to send results to Maxim.")
-                print("Check the Maxim API status and try again.")
+                print("\n⚠️  Maxim evaluation failed.")
+                print(f"📄 Raw results (without scores) still available: {raw_csv_filename}")
         else:
-            print("\n⚠️  No results were collected.")
-            print("Check your agent server and try again.")
+            print("\n⚠️  No results to send to Maxim.")
+            print(f"📄 Raw results saved to: {raw_csv_filename}")
         
         # Calculate and display total time
         overall_elapsed_time = time.time() - overall_start_time
