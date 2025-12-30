@@ -59,7 +59,7 @@ def suppress_maxim_logs():
 
 # Constants for batch processing
 MAX_PARALLEL_PROMPTS = 10
-RETRYABLE_STATUS_CODES = [503, 504]
+RETRYABLE_STATUS_CODES = [401, 503, 504]
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 5
 
@@ -71,7 +71,7 @@ maxim_client = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
 
 
 class RetryableHTTPError(Exception):
-    """Exception raised for retryable HTTP errors (503, 504)."""
+    """Exception raised for retryable HTTP errors (401, 503, 504)."""
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code
         self.message = message
