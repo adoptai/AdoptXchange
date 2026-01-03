@@ -10,6 +10,7 @@ import ast
 import requests
 import argparse
 import time
+import uuid
 from typing import List, Any, Dict, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from contextlib import contextmanager
@@ -172,6 +173,9 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         max_items: Optional maximum number of items to keep in arrays/lists (e.g., 5 for first 5 items)
     """
     try:
+        # Generate a unique trace ID for this prompt to create a new conversation context
+        trace_id = str(uuid.uuid4())
+        
         # Modify the input to include max_items instruction if specified
         modified_input = data["input"]
         if max_items is not None and max_items > 0:
@@ -181,7 +185,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         # If timeout is specified, wrap the call in a ThreadPoolExecutor with timeout
         if timeout is not None and timeout > 0:
             with ThreadPoolExecutor(max_workers=3) as executor:
-                future = executor.submit(run_simple_action, modified_input, profile, access_token)
+                future = executor.submit(run_simple_action, modified_input, profile, access_token, trace_id)
                 try:
                     response = future.result(timeout=timeout)
                 except FutureTimeoutError:
@@ -192,7 +196,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
                     )
         else:
             # No timeout specified, call directly
-            response = run_simple_action(modified_input, profile, access_token)
+            response = run_simple_action(modified_input, profile, access_token, trace_id)
 
         # Parse the response if it's a string representation of a list
         try:

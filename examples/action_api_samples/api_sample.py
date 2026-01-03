@@ -227,7 +227,7 @@ def run_list_actions_message(profile: Dict[str, Any], access_token: str = None) 
         raise ValueError(f"Action message content is not a list. It is: {type(action_message.content)}") # pyright: ignore
     return str(action_message.content) # pyright: ignore
 
-def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None) -> str:
+def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None, trace_id: str = None) -> str:
     """Test running a specific action via langchain adapter."""
     adopt_env = get_adopt_env()
 
@@ -253,6 +253,10 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         "security_params": profile.get("security_params", {})
     }
     
+    # Add trace_id if provided (for separate conversation contexts)
+    if trace_id:
+        request_payload["trace_id"] = trace_id
+    
     response = requests.post(url, headers=headers, json=request_payload)
 
     if response.status_code != 200:
@@ -275,7 +279,7 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
     return "\n".join(str(item) for item in ai_message.content) # pyright: ignore
 
-def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None) -> str:
+def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None, trace_id: str = None) -> str:
     """Simple function to run an action with just a command string.
     
     This is a convenience function that creates a HumanMessage from the command
@@ -285,12 +289,13 @@ def run_simple_action(command: str, profile: Dict[str, Any], access_token: str =
         command: The command string to execute
         profile: The adopt profile configuration
         access_token: Optional authentication token to reuse
+        trace_id: Optional trace ID for conversation context (creates new conversation if provided)
         
     Returns:
         The response from the action execution
     """
     messages = [HumanMessage(content=command)]
-    return run_action(messages, profile, access_token)
+    return run_action(messages, profile, access_token, trace_id)
 
 def run_action_by_id(
     action_id: str,
