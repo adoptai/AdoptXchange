@@ -111,8 +111,9 @@ def filter_json_fields(data: Union[Dict, List, Any], exclude_fields: List[str]) 
 
 def load_test_data_from_csv(csv_file_path: str) -> list:
     """
-    Load test data from a CSV file with columns: Input, Expected_output
-    Skips blank rows and rows with empty Input or Expected_output.
+    Load test data from a CSV file with columns: input, expected_output
+    (case-insensitive - accepts Input/Expected_output or input/expected_output)
+    Skips blank rows and rows with empty input or expected_output.
 
     Args:
         csv_file_path: Path to the CSV file
@@ -126,21 +127,24 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     # Read CSV file, skip blank lines
     df = pd.read_csv(csv_file_path, skip_blank_lines=True)
 
-    # Validate required columns
-    required_columns = ["Input", "Expected_output"]
+    # Normalize column names to lowercase for case-insensitive matching
+    df.columns = df.columns.str.lower().str.strip()
+    
+    # Validate required columns (now lowercase)
+    required_columns = ["input", "expected_output"]
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         raise ValueError(f"CSV file missing required columns: {missing_columns}")
 
     # Drop rows with empty/NaN values in required columns
     original_count = len(df)
-    df = df.dropna(subset=["Input", "Expected_output"])
+    df = df.dropna(subset=["input", "expected_output"])
     
-    # Also drop rows where Input or Expected_output is just whitespace
-    df = df[df["Input"].astype(str).str.strip() != ""]
-    df = df[df["Expected_output"].astype(str).str.strip() != ""]
-    df = df[df["Input"].astype(str).str.lower() != "nan"]
-    df = df[df["Expected_output"].astype(str).str.lower() != "nan"]
+    # Also drop rows where input or expected_output is just whitespace
+    df = df[df["input"].astype(str).str.strip() != ""]
+    df = df[df["expected_output"].astype(str).str.strip() != ""]
+    df = df[df["input"].astype(str).str.lower() != "nan"]
+    df = df[df["expected_output"].astype(str).str.lower() != "nan"]
     
     skipped_count = original_count - len(df)
     if skipped_count > 0:
@@ -150,8 +154,8 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     test_data = []
     for _, row in df.iterrows():
         test_data.append({
-            "input": str(row["Input"]).strip(),
-            "expected_output": str(row["Expected_output"]).strip(),
+            "input": str(row["input"]).strip(),
+            "expected_output": str(row["expected_output"]).strip(),
             "context": "",  # Optional context column, default to empty
         })
     return test_data
@@ -581,7 +585,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
         
         for entry in entries:
             # Normalize input text for matching (strip whitespace)
-            input_text = entry['Question']['payload'].strip()
+            input_text = entry['input']['payload'].strip()
             
             # Extract scores
             stats = entry.get('stats', {})
@@ -625,7 +629,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
         reader = csv.DictReader(csvfile)
         for row in reader:
             # Normalize input text for matching (strip whitespace)
-            input_text = row['question'].strip()
+            input_text = row['input'].strip()
             
             # Try exact match first
             if input_text in scores_lookup:
