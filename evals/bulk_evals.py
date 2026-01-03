@@ -379,6 +379,15 @@ def send_all_results_to_maxim(
     for data, output in all_results:
         precomputed_results[data["input"]] = output
     
+    # Filter test_data to only include items that have results
+    # This ensures we only send data to Maxim that we have precomputed results for
+    test_data_with_results = [
+        data for data in test_data 
+        if data["input"] in precomputed_results
+    ]
+    
+    print(f"  Filtered test_data: {len(test_data)} -> {len(test_data_with_results)} items with results")
+    
     def get_precomputed_result(data):
         input_key = data["input"]
         if input_key in precomputed_results:
@@ -404,7 +413,7 @@ def send_all_results_to_maxim(
                         "context": "CONTEXT_TO_EVALUATE",
                     }
                 )
-                .with_data(test_data)
+                .with_data(test_data_with_results)
                 .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
                 .yields_output(get_precomputed_result)
                 .run()
@@ -548,6 +557,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     # Fetch all Maxim scores and create a lookup by input
     scores_lookup = {}
     total_entries_fetched = 0
+    duplicate_count = 0
     
     for test_run_id in test_run_ids:
         if test_run_id is None:
@@ -555,7 +565,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
         
         print(f"  Fetching scores from test run: {test_run_id}")
         
-        entries_response = fetch_test_run_entries(
+        entries_response = fetch_all_test_run_entries(
             test_run_id=test_run_id,
             workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
             api_key=adopt_env.MAXIM_API_KEY
@@ -570,7 +580,8 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
         total_entries_fetched += len(entries)
         
         for entry in entries:
-            input_text = entry['input']['payload']
+            # Normalize input text for matching (strip whitespace)
+            input_text = entry['Question']['payload'].strip()
             
             # Extract scores
             stats = entry.get('stats', {})
@@ -589,6 +600,12 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                     similarity = "yes" if result['value']['pass'] else "no"
                     break
             
+            # Handle duplicates: keep track of all occurrences but use the latest scores
+            if input_text in scores_lookup:
+                duplicate_count += 1
+                # Keep the latest scores (most recent evaluation)
+                # Could also average or keep first, but latest is usually most accurate
+            
             scores_lookup[input_text] = {
                 'bias': bias_score,
                 'similarity': similarity
@@ -596,6 +613,8 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     
     print(f"\n  Total entries fetched from Maxim: {total_entries_fetched}")
     print(f"  Unique inputs in scores lookup: {len(scores_lookup)}")
+    if duplicate_count > 0:
+        print(f"  ⚠️  Found {duplicate_count} duplicate inputs (kept latest scores)")
     
     # Read the raw CSV and update with scores
     updated_rows = []
@@ -605,15 +624,32 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     with open(raw_csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            input_text = row['input']
+            # Normalize input text for matching (strip whitespace)
+            input_text = row['question'].strip()
+            
+            # Try exact match first
             if input_text in scores_lookup:
                 row['bias'] = scores_lookup[input_text]['bias']
                 row['similarity'] = scores_lookup[input_text]['similarity']
                 matched_count += 1
             else:
-                # Try to find partial match for debugging
-                if len(unmatched_inputs) < 3:  # Only log first 3 unmatched
-                    unmatched_inputs.append(input_text[:50] + "..." if len(input_text) > 50 else input_text)
+                # Try to find a fuzzy match (case-insensitive, normalized whitespace)
+                matched = False
+                normalized_input = input_text.lower().strip()
+                for maxim_input in scores_lookup.keys():
+                    normalized_maxim = maxim_input.lower().strip()
+                    if normalized_input == normalized_maxim:
+                        # Found a case/whitespace variant match
+                        row['bias'] = scores_lookup[maxim_input]['bias']
+                        row['similarity'] = scores_lookup[maxim_input]['similarity']
+                        matched_count += 1
+                        matched = True
+                        break
+                
+                if not matched:
+                    # Try to find partial match for debugging
+                    if len(unmatched_inputs) < 10:  # Show more unmatched for debugging
+                        unmatched_inputs.append(input_text)
             updated_rows.append(row)
     
     # Debug: show sample of lookup keys vs CSV inputs if no matches
@@ -624,7 +660,15 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             print(f"  Sample CSV input (first 80 chars): {updated_rows[0]['input'][:80]}...")
     
     if unmatched_inputs:
-        print(f"  Unmatched CSV inputs (first 3): {unmatched_inputs}")
+        print(f"  Unmatched CSV inputs ({len(unmatched_inputs)} shown):")
+        for i, unmatched in enumerate(unmatched_inputs[:10], 1):
+            print(f"    {i}. {unmatched[:80]}{'...' if len(unmatched) > 80 else ''}")
+        
+        # Show sample of Maxim inputs for comparison
+        if scores_lookup:
+            print(f"\n  Sample Maxim inputs (first 3):")
+            for i, maxim_input in enumerate(list(scores_lookup.keys())[:3], 1):
+                print(f"    {i}. {maxim_input[:80]}{'...' if len(maxim_input) > 80 else ''}")
     
     # Write updated data back
     with open(raw_csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
@@ -699,8 +743,8 @@ def load_existing_results_from_csv(csv_file_path: str) -> Tuple[List[Dict], List
     return test_data, all_results
 
 
-def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
-    """Fetch individual test run entries from Maxim API"""
+def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str, limit: int = 1000, offset: int = 0):
+    """Fetch individual test run entries from Maxim API with pagination support"""
     url = "https://api.getmaxim.ai/v1/test-runs/entries"
     
     headers = {
@@ -709,7 +753,9 @@ def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
     
     params = {
         "workspaceId": workspace_id,
-        "id": test_run_id
+        "id": test_run_id,
+        "limit": limit,
+        "offset": offset
     }
     
     try:
@@ -719,6 +765,78 @@ def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch test run entries: {e}")
         return None
+
+
+def fetch_all_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
+    """Fetch all test run entries from Maxim API, handling pagination automatically.
+    Continues fetching until all entries are retrieved, regardless of count (200, 2000, etc.)
+    """
+    all_entries = []
+    offset = 0
+    page_size = 100  # Fetch 100 entries per page
+    page_num = 1
+    max_pages = 1000  # Safety limit to prevent infinite loops (1000 pages = 100k entries)
+    consecutive_empty_pages = 0
+    
+    while page_num <= max_pages:
+        response = fetch_test_run_entries(test_run_id, workspace_id, api_key, limit=page_size, offset=offset)
+        
+        if not response or 'data' not in response:
+            print(f"    ⚠️  No response or data for page {page_num}, stopping")
+            break
+        
+        entries = response['data'].get('entries', [])
+        
+        # If we got no entries, check if we should stop
+        if not entries:
+            consecutive_empty_pages += 1
+            if consecutive_empty_pages >= 2:  # Stop after 2 consecutive empty pages
+                print(f"    Got {consecutive_empty_pages} consecutive empty pages, stopping")
+                break
+            # Try next page in case of transient issue
+            offset += page_size
+            page_num += 1
+            continue
+        
+        consecutive_empty_pages = 0  # Reset counter on successful fetch
+        all_entries.extend(entries)
+        print(f"    Fetched page {page_num}: {len(entries)} entries (total so far: {len(all_entries)})")
+        
+        # Check if there's pagination metadata indicating more results
+        data = response.get('data', {})
+        total = data.get('total')  # Total count if provided
+        has_more = data.get('hasMore')  # Has more flag if provided
+        
+        # If we've fetched all entries (total matches what we have), stop
+        if total is not None and len(all_entries) >= total:
+            print(f"    ✓ Reached total count: {total}")
+            break
+        
+        # If hasMore is explicitly False, stop
+        if has_more is False:
+            print(f"    ✓ API indicates no more results (hasMore=False)")
+            break
+        
+        # If we got fewer entries than requested, we've reached the end
+        if len(entries) < page_size:
+            print(f"    ✓ Got fewer entries than page size ({len(entries)} < {page_size}), all entries fetched")
+            break
+        
+        # If we got exactly page_size entries, there might be more - continue to next page
+        offset += page_size
+        page_num += 1
+    
+    if page_num > max_pages:
+        print(f"    ⚠️  Reached safety limit of {max_pages} pages, stopping")
+    
+    print(f"    Total entries fetched: {len(all_entries)}")
+    
+    # Return in the same format as the original function
+    return {
+        'data': {
+            'entries': all_entries
+        }
+    }
 
 
 def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
@@ -745,7 +863,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
         print(f"Fetching entries for test run: {test_run_id}")
         
         # Fetch detailed entries from Maxim API
-        entries_response = fetch_test_run_entries(
+        entries_response = fetch_all_test_run_entries(
             test_run_id=test_run_id,
             workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
             api_key=adopt_env.MAXIM_API_KEY
@@ -943,7 +1061,7 @@ Examples:
                 
                 # Update the original CSV with scores
                 print(f"\n📊 Updating CSV with Maxim scores...")
-                update_csv_with_maxim_scores(args.maxim_only, test_run_id)
+                update_csv_with_maxim_scores(args.maxim_only, [test_run_id])
                 
                 print("\n" + "=" * 60)
                 print("✅ MAXIM-ONLY MODE COMPLETE")
