@@ -23,7 +23,7 @@ if _project_root not in sys.path:
 from maxim import maxim
 from maxim.models import YieldedOutput
 from examples import read_env
-from examples.action_api_samples.api_sample import run_simple_action, load_adopt_profile, get_auth_token
+from examples.action_api_samples.api_sample import run_simple_action, run_simple_action_full_response, load_adopt_profile, get_auth_token
 from langchain_core.messages import HumanMessage
 
 
@@ -67,8 +67,8 @@ RETRY_DELAY_SECONDS = 5
 # Get environment variables
 adopt_env = read_env()
 
-# Initialize Maxim SDK
-maxim_client = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
+# Maxim client will be initialized in main() after parsing arguments
+maxim_client = None
 
 
 class RetryableHTTPError(Exception):
@@ -108,6 +108,402 @@ def filter_json_fields(data: Union[Dict, List, Any], exclude_fields: List[str]) 
     else:
         # Return primitive values as-is
         return data
+
+def extract_schema(data: Any) -> Any:
+    """
+    Extract schema/structure from data (dict keys, list types, etc.).
+    Converts values to their types, recursively handles nested structures.
+    
+    Args:
+        data: The data structure (dict, list, or primitive)
+        
+    Returns:
+        Schema representation with types instead of values
+    """
+    if isinstance(data, dict):
+        return {key: extract_schema(value) for key, value in data.items()}
+    elif isinstance(data, list):
+        if len(data) > 0:
+            # Use first item's schema as template for list items
+            return [extract_schema(data[0])]
+        return []
+    else:
+        # Return type name for primitives
+        if data is None:
+            return "NoneType"
+        return type(data).__name__
+
+def validate_schema(actual: Any, expected_schema: Any, check_extra_keys: bool = True) -> Tuple[bool, List[str]]:
+    """
+    Validate that actual output matches expected schema structure.
+    
+    Args:
+        actual: The actual output data to validate
+        expected_schema: The expected schema structure
+        check_extra_keys: If True, check for extra keys in actual output that aren't in expected schema
+        
+    Returns:
+        Tuple of (is_valid, list_of_errors)
+    """
+    errors = []
+    
+    def compare_structure(actual_val, expected_schema_val, path=""):
+        if isinstance(expected_schema_val, dict):
+            if not isinstance(actual_val, dict):
+                errors.append(f"{path}: Expected dict, got {type(actual_val).__name__}")
+                return
+            # Check for missing keys
+            for key in expected_schema_val:
+                if key not in actual_val:
+                    errors.append(f"{path}.{key}: Missing required key")
+                else:
+                    compare_structure(actual_val[key], expected_schema_val[key], 
+                                    f"{path}.{key}" if path else key)
+            
+            # Check for extra keys (keys in actual that aren't in expected)
+            if check_extra_keys:
+                for key in actual_val:
+                    if key not in expected_schema_val:
+                        errors.append(f"{path}.{key}: Unexpected key (not in expected schema)")
+        elif isinstance(expected_schema_val, list):
+            if not isinstance(actual_val, list):
+                errors.append(f"{path}: Expected list, got {type(actual_val).__name__}")
+                return
+            if len(expected_schema_val) > 0 and len(actual_val) > 0:
+                # Validate first item schema
+                compare_structure(actual_val[0], expected_schema_val[0], f"{path}[0]")
+        else:
+            # Type validation
+            expected_type = expected_schema_val
+            actual_type = type(actual_val).__name__ if actual_val is not None else "NoneType"
+            
+            # Allow flexible type matching (int/float, str compatibility)
+            type_matches = (
+                expected_type == actual_type or
+                (expected_type == 'int' and actual_type == 'float') or
+                (expected_type == 'float' and actual_type == 'int') or
+                (expected_type == 'str' and actual_type in ['int', 'float']) or
+                (expected_type == 'NoneType' and actual_val is None)
+            )
+            
+            if not type_matches:
+                errors.append(f"{path}: Expected {expected_type}, got {actual_type}")
+    
+    compare_structure(actual, expected_schema)
+    return len(errors) == 0, errors
+
+def extract_tracing_steps(debug_tracing: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract normalized tracing steps from debug_tracing for comparison.
+    
+    Args:
+        debug_tracing: The debug_tracing dictionary from response
+        
+    Returns:
+        List of normalized step dictionaries with key fields for comparison
+    """
+    steps = []
+    
+    # Extract step_traces which contain operation details
+    if isinstance(debug_tracing, dict) and "step_traces" in debug_tracing:
+        step_traces = debug_tracing.get("step_traces", [])
+        
+        for trace in step_traces:
+            if isinstance(trace, dict):
+                step_info = {
+                    "operation_id": trace.get("operation_id", ""),
+                    "operation_type": trace.get("operation_type", ""),
+                }
+                
+                # Extract method and URL from resolved_operation for REST calls
+                resolved_operation = trace.get("resolved_operation")
+                if isinstance(resolved_operation, dict):
+                    step_info["method"] = resolved_operation.get("method", "")
+                    step_info["url"] = resolved_operation.get("url", "")
+                
+                # Extract widdle operations from execution_log if available
+                # This captures operations defined in the workflow
+                execution_log = debug_tracing.get("execution_log", [])
+                for log_entry in execution_log:
+                    if isinstance(log_entry, dict) and "widdle" in log_entry:
+                        widdle = log_entry.get("widdle", [])
+                        for w in widdle:
+                            if isinstance(w, dict) and w.get("id") == step_info["operation_id"]:
+                                step_info["method"] = w.get("method", step_info.get("method", ""))
+                                step_info["operation"] = w.get("operation", "")
+                                step_info["url_template"] = w.get("url", step_info.get("url", ""))
+                
+                steps.append(step_info)
+    
+    return steps
+
+def normalize_step_for_comparison(step: Dict[str, Any]) -> str:
+    """
+    Create a normalized string representation of a step for comparison.
+    
+    Args:
+        step: Step dictionary
+        
+    Returns:
+        Normalized string representation
+    """
+    parts = []
+    
+    if step.get("operation_id"):
+        parts.append(f"id:{step['operation_id']}")
+    if step.get("operation_type"):
+        parts.append(f"type:{step['operation_type']}")
+    if step.get("method"):
+        parts.append(f"method:{step['method']}")
+    if step.get("operation"):
+        parts.append(f"op:{step['operation']}")
+    if step.get("url") or step.get("url_template"):
+        url = step.get("url") or step.get("url_template", "")
+        # Normalize URL by removing query params and path variables for comparison
+        normalized_url = url.split("?")[0] if url else ""
+        if normalized_url:
+            parts.append(f"url:{normalized_url}")
+    
+    return "|".join(parts)
+
+def compare_tracing(expected_tracing: Dict[str, Any], actual_tracing: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Compare expected and actual tracing steps.
+    
+    Args:
+        expected_tracing: Expected debug_tracing dictionary
+        actual_tracing: Actual debug_tracing dictionary
+        
+    Returns:
+        Tuple of (tracing_valid, tracing_errors)
+        tracing_valid: "yes", "no", or "skipped"
+        tracing_errors: Error messages (semicolon-separated) or empty string
+    """
+    try:
+        expected_steps = extract_tracing_steps(expected_tracing)
+        actual_steps = extract_tracing_steps(actual_tracing)
+        
+        if not expected_steps:
+            return "skipped", "No expected tracing steps found in debug_tracing"
+        
+        if not actual_steps:
+            return "no", "No actual tracing steps found in debug_tracing"
+        
+        # Normalize steps for comparison
+        expected_normalized = {normalize_step_for_comparison(step): step for step in expected_steps}
+        actual_normalized = {normalize_step_for_comparison(step): step for step in actual_steps}
+        
+        errors = []
+        
+        # Check for missing steps
+        missing_steps = set(expected_normalized.keys()) - set(actual_normalized.keys())
+        if missing_steps:
+            for missing_step in missing_steps:
+                step_info = expected_normalized[missing_step]
+                step_desc = f"id:{step_info.get('operation_id')}, type:{step_info.get('operation_type')}"
+                errors.append(f"Missing step: {step_desc}")
+        
+        # Check for additional/unexpected steps
+        additional_steps = set(actual_normalized.keys()) - set(expected_normalized.keys())
+        if additional_steps:
+            for additional_step in additional_steps:
+                step_info = actual_normalized[additional_step]
+                step_desc = f"id:{step_info.get('operation_id')}, type:{step_info.get('operation_type')}"
+                errors.append(f"Unexpected step: {step_desc}")
+        
+        tracing_valid = "yes" if len(errors) == 0 else "no"
+        tracing_errors = "; ".join(errors) if errors else ""
+        
+        return tracing_valid, tracing_errors
+        
+    except Exception as e:
+        return "error", f"Error comparing tracing: {str(e)}"
+
+def extract_output_type_info(response: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract output_type and related styling information from response.
+    
+    Args:
+        response: The full response dictionary
+        
+    Returns:
+        Dictionary with output_type, data_structure, and format details
+    """
+    info = {
+        "output_type": None,
+        "data_structure": None,
+        "has_ordered_fields": False,
+        "data_item_count": 0
+    }
+    
+    try:
+        ai_message = response.get("ai_message", {})
+        content = ai_message.get("content", [])
+        
+        if isinstance(content, list) and len(content) > 0:
+            first_content = content[0]
+            if isinstance(first_content, dict):
+                info["output_type"] = first_content.get("output_type", None)
+                data = first_content.get("data", [])
+                
+                # Analyze data structure
+                if isinstance(data, list):
+                    info["data_item_count"] = len(data)
+                    if len(data) > 0:
+                        if isinstance(data[0], dict):
+                            info["data_structure"] = "list of dicts"
+                        else:
+                            info["data_structure"] = f"list of {type(data[0]).__name__}"
+                    else:
+                        info["data_structure"] = "empty list"
+                else:
+                    info["data_structure"] = type(data).__name__
+                
+                # Check for ordered display fields (indicates table structure)
+                ordered_fields = first_content.get("ordered_display_fields", [])
+                if ordered_fields and isinstance(ordered_fields, list) and len(ordered_fields) > 0:
+                    info["has_ordered_fields"] = True
+    except Exception:
+        pass
+    
+    return info
+
+def format_style_comparison_for_maxim(expected_info: Dict[str, Any], actual_info: Dict[str, Any]) -> str:
+    """
+    Format output_type/style comparison as natural language for Maxim semantic evaluation.
+    
+    Args:
+        expected_info: Output type info from expected response
+        actual_info: Output type info from actual response
+        
+    Returns:
+        Natural language comparison string for Maxim to evaluate
+    """
+    expected_type = expected_info.get("output_type", "unknown")
+    actual_type = actual_info.get("output_type", "unknown")
+    expected_structure = expected_info.get("data_structure", "unknown")
+    actual_structure = actual_info.get("data_structure", "unknown")
+    
+    comparison = f"""Output Format Validation:
+Expected format: {expected_type} with {expected_structure}
+Actual format: {actual_type} with {actual_structure}
+
+The output format must match exactly. If expected format is 'table', actual must also be 'table' with list of dicts structure. If expected is 'bullets_list', actual must be 'bullets_list'. Format mismatches (like table vs list, or unformatted text) are critical errors."""
+    
+    return comparison
+
+def validate_tracing(expected_output_str: str, actual_output: Any) -> Tuple[str, str]:
+    """
+    Validate actual output tracing against expected output tracing.
+    
+    Args:
+        expected_output_str: String representation of expected output (JSON/Python dict)
+        actual_output: The actual output data
+        
+    Returns:
+        Tuple of (tracing_valid, tracing_errors)
+    """
+    try:
+        # Parse expected_output
+        if isinstance(expected_output_str, str):
+            try:
+                expected_dict = json.loads(expected_output_str)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    expected_dict = ast.literal_eval(expected_output_str)
+                except (ValueError, SyntaxError):
+                    return "error", "Could not parse expected_output as JSON or Python literal"
+        else:
+            expected_dict = expected_output_str
+        
+        # Extract debug_tracing from expected
+        expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+        if not expected_tracing:
+            return "skipped", "No debug_tracing found in expected_output"
+        
+        # Parse actual output
+        if isinstance(actual_output, str):
+            try:
+                actual_dict = json.loads(actual_output)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    actual_dict = ast.literal_eval(actual_output)
+                except (ValueError, SyntaxError):
+                    return "error", "Could not parse actual output as JSON or Python literal"
+        else:
+            actual_dict = actual_output
+        
+        # Extract debug_tracing from actual
+        actual_tracing = actual_dict.get("debug_tracing") if isinstance(actual_dict, dict) else None
+        if not actual_tracing:
+            return "no", "No debug_tracing found in actual output"
+        
+        # Compare tracing
+        return compare_tracing(expected_tracing, actual_tracing)
+        
+    except Exception as e:
+        return "error", f"Unexpected error validating tracing: {str(e)}"
+
+def validate_response_schema(expected_output_str: str, actual_output: Any) -> Tuple[str, str]:
+    """
+    Validate actual output schema against expected output structure.
+    
+    Args:
+        expected_output_str: String representation of expected output (JSON)
+        actual_output: The actual output data
+        
+    Returns:
+        Tuple of (schema_valid, schema_errors)
+        schema_valid: "yes", "no", "error", or "skipped"
+        schema_errors: Error messages (semicolon-separated) or empty string
+    """
+    try:
+        # Parse expected_output to extract schema
+        # Try both JSON and Python literal formats
+        if isinstance(expected_output_str, str):
+            try:
+                # Try JSON first (requires double quotes)
+                expected_dict = json.loads(expected_output_str)
+            except (json.JSONDecodeError, ValueError):
+                # If JSON fails, try Python literal (supports single quotes, True/False, None)
+                try:
+                    expected_dict = ast.literal_eval(expected_output_str)
+                except (ValueError, SyntaxError) as e:
+                    return "error", f"Could not parse expected_output as JSON or Python literal: {str(e)}"
+        else:
+            expected_dict = expected_output_str
+        
+        expected_schema = extract_schema(expected_dict)
+        
+        # Try to parse actual output
+        try:
+            if isinstance(actual_output, str):
+                # Try to parse as JSON first
+                try:
+                    actual_dict = json.loads(actual_output)
+                except (json.JSONDecodeError, ValueError):
+                    # Try ast.literal_eval for Python literals
+                    try:
+                        actual_dict = ast.literal_eval(actual_output)
+                    except (ValueError, SyntaxError):
+                        # If parsing fails, can't validate schema
+                        return "error", "Could not parse actual output as JSON or Python literal"
+            else:
+                actual_dict = actual_output
+            
+            # Perform schema validation
+            is_valid, errors = validate_schema(actual_dict, expected_schema)
+            schema_valid = "yes" if is_valid else "no"
+            schema_errors = "; ".join(errors) if errors else ""
+            return schema_valid, schema_errors
+            
+        except Exception as e:
+            return "error", f"Error validating schema: {str(e)}"
+            
+    except Exception as e:
+        # This shouldn't happen now since we handle parsing errors above,
+        # but catch any other unexpected errors
+        return "error", f"Unexpected error parsing expected_output: {str(e)}"
 
 def load_test_data_from_csv(csv_file_path: str) -> list:
     """
@@ -186,12 +582,12 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
             # Append instruction to limit results in the prompt
             modified_input = f"{data['input']}\n\nPlease limit your response to only the first {max_items} items if returning a list, table, or array of results."
         
-        # If timeout is specified, wrap the call in a ThreadPoolExecutor with timeout
+        # Get full response for schema validation (includes status, message, ai_message, debug_tracing)
         if timeout is not None and timeout > 0:
             with ThreadPoolExecutor(max_workers=3) as executor:
-                future = executor.submit(run_simple_action, modified_input, profile, access_token, trace_id)
+                future = executor.submit(run_simple_action_full_response, modified_input, profile, access_token, trace_id)
                 try:
-                    response = future.result(timeout=timeout)
+                    full_response = future.result(timeout=timeout)
                 except FutureTimeoutError:
                     # Timeout occurred, return "timed out" as the response
                     return YieldedOutput(
@@ -200,7 +596,18 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
                     )
         else:
             # No timeout specified, call directly
-            response = run_simple_action(modified_input, profile, access_token, trace_id)
+            full_response = run_simple_action_full_response(modified_input, profile, access_token, trace_id)
+        
+        # Extract the formatted response string for display/Maxim evaluation
+        # This maintains backward compatibility with existing evaluation flow
+        if "ai_message" in full_response:
+            ai_message = full_response["ai_message"]
+            if "content" in ai_message and isinstance(ai_message["content"], list):
+                response = "\n".join(str(item) for item in ai_message["content"])
+            else:
+                response = str(ai_message.get("content", ""))
+        else:
+            response = str(full_response)
 
         # Parse the response if it's a string representation of a list
         try:
@@ -253,9 +660,18 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         except (ValueError, SyntaxError):
             # If parsing fails, use the original response
             response_data = response
+        
+        # Store full_response as JSON string in a special format for schema validation
+        # We'll store it in the YieldedOutput data with a way to extract it later
+        # For schema validation, we need the full_response, not the formatted string
+        # We'll store it in the output so validate_response_schema can access it
+        
         # Return the agent's response in the expected YieldedOutput format
+        # Store full_response as a tuple with (formatted_data, full_response_dict) for schema validation
+        output_data = (response_data, full_response) if isinstance(full_response, dict) else response_data
+        
         return YieldedOutput(
-            data=response_data,
+            data=output_data,
             retrieved_context_to_evaluate=data.get("context", ""),
         )
 
@@ -378,6 +794,11 @@ def send_all_results_to_maxim(
     Returns:
         Test run ID if successful, None otherwise
     """
+    # Safety check: if Maxim client is not initialized, return None
+    if maxim_client is None:
+        print("⚠️  Maxim client not initialized - skipping Maxim evaluation")
+        return None
+    
     # Create lookup for precomputed results
     precomputed_results = {}
     for data, output in all_results:
@@ -395,7 +816,19 @@ def send_all_results_to_maxim(
     def get_precomputed_result(data):
         input_key = data["input"]
         if input_key in precomputed_results:
-            return precomputed_results[input_key]
+            output = precomputed_results[input_key]
+            # Extract formatted text for Maxim evaluators (Bias, Similarity)
+            # If output.data is a tuple (formatted_string, full_response_dict), use formatted_string
+            if isinstance(output.data, tuple) and len(output.data) == 2:
+                formatted_output, _ = output.data
+                # Return a new YieldedOutput with just the formatted text for Maxim
+                return YieldedOutput(
+                    data=formatted_output,
+                    retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+                )
+            else:
+                # Return as-is if not a tuple
+                return output
         else:
             return YieldedOutput(
                 data="Error: Result not found in precomputed cache",
@@ -418,7 +851,7 @@ def send_all_results_to_maxim(
                     }
                 )
                 .with_data(test_data_with_results)
-                .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
+                .with_evaluators("Bias", "Ragas Answer Semantic Similarity", "Ragas Context Precision")
                 .yields_output(get_precomputed_result)
                 .run()
             )
@@ -443,7 +876,7 @@ def initialize_raw_csv(csv_filename: str) -> None:
     import csv
     
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+        fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'style_valid', 'style_errors', 'bias', 'similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
     
@@ -463,17 +896,50 @@ def append_batch_to_csv(
     import csv
     
     with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+        fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'style_valid', 'style_errors', 'bias', 'similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
         for data, output in batch_results:
-            # Escape newlines in actual output
-            actual_output = str(output.data).replace('\n', '\\n') if output.data else ""
+            # Extract formatted output and full response
+            # output.data may be a tuple (formatted_string, full_response_dict) or just a string
+            if isinstance(output.data, tuple) and len(output.data) == 2:
+                formatted_output, full_response = output.data
+                # Use full_response for both CSV storage and schema validation
+                # Serialize full_response as JSON string for CSV
+                actual_output = json.dumps(full_response) if isinstance(full_response, dict) else str(full_response)
+                actual_output = actual_output.replace('\n', '\\n')  # Escape newlines for CSV
+                schema_validation_input = full_response
+            else:
+                # Fallback for old format
+                actual_output = str(output.data).replace('\n', '\\n') if output.data else ""
+                schema_validation_input = output.data
+            
+            # Perform schema validation using full response structure
+            schema_valid, schema_errors = validate_response_schema(
+                data['expected_output'],
+                schema_validation_input
+            )
+            
+            # Perform tracing validation
+            tracing_valid, tracing_errors = validate_tracing(
+                data['expected_output'],
+                schema_validation_input
+            )
+            
+            # Escape newlines in errors for CSV
+            schema_errors_csv = schema_errors.replace('\n', '\\n') if schema_errors else ""
+            tracing_errors_csv = tracing_errors.replace('\n', '\\n') if tracing_errors else ""
             
             writer.writerow({
                 'input': data['input'],
                 'expected_output': data['expected_output'],
                 'actual_output': actual_output,
+                'schema_valid': schema_valid,
+                'schema_errors': schema_errors_csv,
+                'tracing_valid': tracing_valid,
+                'tracing_errors': tracing_errors_csv,
+                'style_valid': '',  # Will be filled by Maxim later
+                'style_errors': '',  # Will be filled by Maxim later
                 'bias': '',  # Will be filled by Maxim later
                 'similarity': ''  # Will be filled by Maxim later
             })
@@ -503,7 +969,48 @@ def send_batch_to_maxim_background(
     def get_precomputed_result(data):
         input_key = data["input"]
         if input_key in precomputed_results:
-            return precomputed_results[input_key]
+            output = precomputed_results[input_key]
+            # Extract formatted text for Maxim evaluators (Bias, Similarity)
+            # If output.data is a tuple (formatted_string, full_response_dict), use formatted_string
+            if isinstance(output.data, tuple) and len(output.data) == 2:
+                formatted_output, full_response = output.data
+                
+                # Extract output_type info for style validation
+                try:
+                    # Parse expected_output to extract style info
+                    expected_output_str = data.get("expected_output", "")
+                    if isinstance(expected_output_str, str):
+                        try:
+                            expected_dict = json.loads(expected_output_str)
+                        except (json.JSONDecodeError, ValueError):
+                            try:
+                                expected_dict = ast.literal_eval(expected_output_str)
+                            except (ValueError, SyntaxError):
+                                expected_dict = {}
+                    else:
+                        expected_dict = expected_output_str
+                    
+                    expected_info = extract_output_type_info(expected_dict)
+                    actual_info = extract_output_type_info(full_response if isinstance(full_response, dict) else {})
+                    
+                    # Format style comparison for Maxim semantic evaluation
+                    style_comparison = format_style_comparison_for_maxim(expected_info, actual_info)
+                    
+                    # Add to context for Maxim to evaluate
+                    existing_context = output.retrieved_context_to_evaluate or ""
+                    combined_context = f"{existing_context}\n\n{style_comparison}" if existing_context else style_comparison
+                except Exception:
+                    # If style extraction fails, use existing context
+                    combined_context = output.retrieved_context_to_evaluate
+                
+                # Return a new YieldedOutput with formatted text and style validation context
+                return YieldedOutput(
+                    data=formatted_output,
+                    retrieved_context_to_evaluate=combined_context,
+                )
+            else:
+                # Return as-is if not a tuple
+                return output
         else:
             return YieldedOutput(
                 data="Error: Result not found in precomputed cache",
@@ -525,7 +1032,7 @@ def send_batch_to_maxim_background(
                     }
                 )
                 .with_data(batch_data)
-                .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
+                .with_evaluators("Bias", "Ragas Answer Semantic Similarity", "Ragas Context Precision")
                 .yields_output(get_precomputed_result)
                 .run()
             )
@@ -604,6 +1111,18 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                     similarity = "yes" if result['value']['pass'] else "no"
                     break
             
+            # Extract style validation from Ragas Context Precision
+            # This evaluates if the context (which includes style comparison) matches
+            style_valid = "no"
+            context_precision_score = 0
+            for result in overall_results:
+                if result['name'] == 'Ragas Context Precision':
+                    context_precision_score = result['value']
+                    # If context precision is high, style likely matches
+                    # Threshold: >= 0.7 means styles match
+                    style_valid = "yes" if context_precision_score >= 0.7 else "no"
+                    break
+            
             # Handle duplicates: keep track of all occurrences but use the latest scores
             if input_text in scores_lookup:
                 duplicate_count += 1
@@ -612,7 +1131,9 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             
             scores_lookup[input_text] = {
                 'bias': bias_score,
-                'similarity': similarity
+                'similarity': similarity,
+                'style_valid': style_valid,
+                'style_score': context_precision_score
             }
     
     print(f"\n  Total entries fetched from Maxim: {total_entries_fetched}")
@@ -635,6 +1156,14 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             if input_text in scores_lookup:
                 row['bias'] = scores_lookup[input_text]['bias']
                 row['similarity'] = scores_lookup[input_text]['similarity']
+                # Add style validation if available
+                if 'style_valid' in scores_lookup[input_text]:
+                    row['style_valid'] = scores_lookup[input_text]['style_valid']
+                    # Store style score as error detail if validation failed
+                    if scores_lookup[input_text]['style_valid'] == 'no':
+                        row['style_errors'] = f"Style mismatch (Context Precision: {scores_lookup[input_text].get('style_score', 0):.2f})"
+                    else:
+                        row['style_errors'] = ""
                 matched_count += 1
             else:
                 # Try to find a fuzzy match (case-insensitive, normalized whitespace)
@@ -646,6 +1175,13 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                         # Found a case/whitespace variant match
                         row['bias'] = scores_lookup[maxim_input]['bias']
                         row['similarity'] = scores_lookup[maxim_input]['similarity']
+                        # Add style validation if available
+                        if 'style_valid' in scores_lookup[maxim_input]:
+                            row['style_valid'] = scores_lookup[maxim_input]['style_valid']
+                            if scores_lookup[maxim_input]['style_valid'] == 'no':
+                                row['style_errors'] = f"Style mismatch (Context Precision: {scores_lookup[maxim_input].get('style_score', 0):.2f})"
+                            else:
+                                row['style_errors'] = ""
                         matched_count += 1
                         matched = True
                         break
@@ -675,8 +1211,21 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                 print(f"    {i}. {maxim_input[:80]}{'...' if len(maxim_input) > 80 else ''}")
     
     # Write updated data back
+    # Preserve schema_valid, schema_errors, tracing_valid, and tracing_errors if they exist in the rows
+    all_fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'similarity']
+    # Check what fields actually exist in the rows (for backward compatibility)
+    if updated_rows:
+        existing_fields = set(updated_rows[0].keys())
+        fieldnames = [f for f in all_fieldnames if f in existing_fields]
+        # Add any other unexpected fields
+        for row in updated_rows:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+    else:
+        fieldnames = all_fieldnames
+    
     with open(raw_csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(updated_rows)
@@ -905,12 +1454,30 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
                     break
             
             # Escape newlines in actual output to match expected output format
-            actual_output = actual_output.replace('\n', '\\n')
+            actual_output_escaped = actual_output.replace('\n', '\\n')
+            
+            # Perform schema validation
+            schema_valid, schema_errors = validate_response_schema(
+                expected_output,
+                actual_output
+            )
+            schema_errors_csv = schema_errors.replace('\n', '\\n') if schema_errors else ""
+            
+            # Perform tracing validation
+            tracing_valid, tracing_errors = validate_tracing(
+                expected_output,
+                actual_output
+            )
+            tracing_errors_csv = tracing_errors.replace('\n', '\\n') if tracing_errors else ""
             
             all_csv_data.append({
                 'input': input_text,
                 'expected_output': expected_output,
-                'actual_output': actual_output,
+                'actual_output': actual_output_escaped,
+                'schema_valid': schema_valid,
+                'schema_errors': schema_errors_csv,
+                'tracing_valid': tracing_valid,
+                'tracing_errors': tracing_errors_csv,
                 'bias': bias_score,
                 'similarity': similarity
             })
@@ -922,7 +1489,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
     # Write to CSV file
     try:
         with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['input', 'expected_output', 'actual_output', 'bias', 'similarity']
+            fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'style_valid', 'style_errors', 'bias', 'similarity']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
@@ -967,6 +1534,9 @@ Examples:
   
   # Custom batch size and retry settings
   python evals/bulk_evals.py --batch-size 5 --max-retries 5
+  
+  # Skip Maxim evaluation (results saved to CSV without scores)
+  python evals/bulk_evals.py --skip-maxim
         """
     )
     
@@ -1020,14 +1590,28 @@ Examples:
         help='Skip batch processing and only run Maxim evaluation on an existing CSV file with actual_output already filled'
     )
     
+    parser.add_argument(
+        '--skip-maxim',
+        action='store_true',
+        help='Skip all Maxim evaluation runs. Results will still be saved to CSV but without Maxim scores.'
+    )
+    
     args = parser.parse_args()
     
-    # Check for MAXIM API key (always required)
-    if not adopt_env.MAXIM_API_KEY:
-        raise ValueError("MAXIM_API_KEY environment variable is required")
+    # Initialize Maxim SDK only if not skipping
+    global maxim_client
+    if not args.skip_maxim:
+        # Check for MAXIM API key (only required if not skipping Maxim)
+        if not adopt_env.MAXIM_API_KEY:
+            raise ValueError("MAXIM_API_KEY environment variable is required")
 
-    if not adopt_env.MAXIM_WORKSPACE_ID:
-        raise ValueError("MAXIM_WORKSPACE_ID environment variable is required")
+        if not adopt_env.MAXIM_WORKSPACE_ID:
+            raise ValueError("MAXIM_WORKSPACE_ID environment variable is required")
+        
+        maxim_client = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
+    else:
+        print("⚠️  --skip-maxim flag is set - Maxim evaluation will be skipped")
+        maxim_client = None
     
     # ==================== MAXIM-ONLY MODE ====================
     if args.maxim_only:
@@ -1035,6 +1619,11 @@ Examples:
         print("🔬 MAXIM-ONLY MODE")
         print("=" * 60)
         print(f"Loading existing results from: {args.maxim_only}")
+        
+        if args.skip_maxim:
+            print("\n⚠️  --skip-maxim flag is set - Maxim evaluation will be skipped")
+            print("📄 CSV file remains unchanged (no scores added)")
+            return
         
         maxim_start_time = time.time()
         
@@ -1092,6 +1681,9 @@ Examples:
     print("Starting bulk evaluation process...")
     print(f"CSV file: {args.csv_file}")
     print(f"Loaded {len(test_data)} test cases from CSV")
+    print("✓ Schema validation enabled: Validating actual output structure against expected_output schema")
+    print("✓ Tracing validation enabled: Validating execution steps, tools, APIs, and methods from debug_tracing")
+    print("✓ Style validation enabled: Validating output_type and format (table/list) via Maxim semantic evaluation")
     
     if exclude_fields:
         print(f"Excluding fields from response: {', '.join(exclude_fields)}")
@@ -1201,37 +1793,44 @@ Examples:
         print(f"Raw results saved to: {raw_csv_filename}")
         
         # Phase 2: Send ALL results to Maxim in ONE call (faster than per-batch)
-        print(f"\n{'='*50}")
-        print(f"SENDING TO MAXIM FOR EVALUATION")
-        print(f"{'='*50}")
-        
-        maxim_start_time = time.time()
-        test_run_id = None
-        
-        if all_results:
-            print(f"Sending {len(all_results)} results to Maxim...")
-            
-            test_run_id = send_all_results_to_maxim(
-                test_data=test_data,
-                all_results=all_results
-            )
-            
-            maxim_elapsed_time = time.time() - maxim_start_time
-            
-            if test_run_id:
-                print(f"✓ Results sent to Maxim (test run: {test_run_id})")
-                print(f"⏱️  Maxim evaluation time: {maxim_elapsed_time:.2f}s")
-                
-                # Phase 3: Update CSV with Maxim scores
-                print("\nUpdating CSV with Maxim evaluation scores...")
-                update_csv_with_maxim_scores(raw_csv_filename, [test_run_id])
-                print(f"\n📄 Final results saved to: {raw_csv_filename}")
-            else:
-                print("\n⚠️  Maxim evaluation failed.")
-                print(f"📄 Raw results (without scores) still available: {raw_csv_filename}")
-        else:
-            print("\n⚠️  No results to send to Maxim.")
+        if args.skip_maxim:
+            print(f"\n{'='*50}")
+            print(f"SKIPPING MAXIM EVALUATION (--skip-maxim flag is set)")
+            print(f"{'='*50}")
             print(f"📄 Raw results saved to: {raw_csv_filename}")
+            print(f"⚠️  Maxim evaluation skipped - no scores added")
+        else:
+            print(f"\n{'='*50}")
+            print(f"SENDING TO MAXIM FOR EVALUATION")
+            print(f"{'='*50}")
+            
+            maxim_start_time = time.time()
+            test_run_id = None
+            
+            if all_results:
+                print(f"Sending {len(all_results)} results to Maxim...")
+                
+                test_run_id = send_all_results_to_maxim(
+                    test_data=test_data,
+                    all_results=all_results
+                )
+                
+                maxim_elapsed_time = time.time() - maxim_start_time
+                
+                if test_run_id:
+                    print(f"✓ Results sent to Maxim (test run: {test_run_id})")
+                    print(f"⏱️  Maxim evaluation time: {maxim_elapsed_time:.2f}s")
+                    
+                    # Phase 3: Update CSV with Maxim scores
+                    print("\nUpdating CSV with Maxim evaluation scores...")
+                    update_csv_with_maxim_scores(raw_csv_filename, [test_run_id])
+                    print(f"\n📄 Final results saved to: {raw_csv_filename}")
+                else:
+                    print("\n⚠️  Maxim evaluation failed.")
+                    print(f"📄 Raw results (without scores) still available: {raw_csv_filename}")
+            else:
+                print("\n⚠️  No results to send to Maxim.")
+                print(f"📄 Raw results saved to: {raw_csv_filename}")
         
         # Calculate and display total time
         overall_elapsed_time = time.time() - overall_start_time
@@ -1242,6 +1841,82 @@ Examples:
         print(f"Batch processing time: {total_batch_time:.2f}s")
         print(f"Total elapsed time:    {overall_elapsed_time:.2f}s")
         print(f"Average time per prompt: {overall_elapsed_time / len(all_results):.2f}s" if all_results else "")
+        
+        # Display schema validation summary if we have results
+        if all_results and os.path.exists(raw_csv_filename):
+            try:
+                df_results = pd.read_csv(raw_csv_filename)
+                if 'schema_valid' in df_results.columns:
+                    schema_valid_count = len(df_results[df_results['schema_valid'] == 'yes'])
+                    schema_invalid_count = len(df_results[df_results['schema_valid'] == 'no'])
+                    schema_error_count = len(df_results[df_results['schema_valid'] == 'error'])
+                    schema_skipped_count = len(df_results[df_results['schema_valid'] == 'skipped'])
+                    total_schema_tested = len(df_results) - schema_skipped_count
+                    
+                    print(f"\n{'='*50}")
+                    print(f"SCHEMA VALIDATION SUMMARY")
+                    print(f"{'='*50}")
+                    print(f"✓ Valid schemas:   {schema_valid_count}")
+                    print(f"✗ Invalid schemas: {schema_invalid_count}")
+                    print(f"⚠️  Schema errors:  {schema_error_count}")
+                    if schema_skipped_count > 0:
+                        print(f"⊘ Skipped:        {schema_skipped_count} (non-JSON expected_output)")
+                    if total_schema_tested > 0:
+                        success_rate = (schema_valid_count / total_schema_tested) * 100
+                        print(f"\nSchema validation pass rate: {success_rate:.1f}%")
+            except Exception as e:
+                # If CSV reading fails, just skip the summary
+                pass
+        
+        # Display tracing validation summary if we have results
+        if all_results and os.path.exists(raw_csv_filename):
+            try:
+                df_results = pd.read_csv(raw_csv_filename)
+                if 'tracing_valid' in df_results.columns:
+                    tracing_valid_count = len(df_results[df_results['tracing_valid'] == 'yes'])
+                    tracing_invalid_count = len(df_results[df_results['tracing_valid'] == 'no'])
+                    tracing_error_count = len(df_results[df_results['tracing_valid'] == 'error'])
+                    tracing_skipped_count = len(df_results[df_results['tracing_valid'] == 'skipped'])
+                    total_tracing_tested = len(df_results) - tracing_skipped_count
+                    
+                    print(f"\n{'='*50}")
+                    print(f"TRACING VALIDATION SUMMARY")
+                    print(f"{'='*50}")
+                    print(f"✓ Valid tracings:   {tracing_valid_count}")
+                    print(f"✗ Invalid tracings: {tracing_invalid_count}")
+                    print(f"⚠️  Tracing errors:  {tracing_error_count}")
+                    if tracing_skipped_count > 0:
+                        print(f"⊘ Skipped:        {tracing_skipped_count} (no debug_tracing in expected_output)")
+                    if total_tracing_tested > 0:
+                        success_rate = (tracing_valid_count / total_tracing_tested) * 100
+                        print(f"\nTracing validation pass rate: {success_rate:.1f}%")
+            except Exception as e:
+                # If CSV reading fails, just skip the summary
+                pass
+        
+        # Display style validation summary if we have results
+        if all_results and os.path.exists(raw_csv_filename):
+            try:
+                df_results = pd.read_csv(raw_csv_filename)
+                if 'style_valid' in df_results.columns:
+                    style_valid_count = len(df_results[df_results['style_valid'] == 'yes'])
+                    style_invalid_count = len(df_results[df_results['style_valid'] == 'no'])
+                    style_empty_count = len(df_results[df_results['style_valid'] == ''])
+                    total_style_tested = len(df_results) - style_empty_count
+                    
+                    print(f"\n{'='*50}")
+                    print(f"OUTPUT STYLE VALIDATION SUMMARY (via Maxim)")
+                    print(f"{'='*50}")
+                    print(f"✓ Valid styles:   {style_valid_count}")
+                    print(f"✗ Invalid styles: {style_invalid_count}")
+                    if style_empty_count > 0:
+                        print(f"⊘ Not evaluated: {style_empty_count} (awaiting Maxim results)")
+                    if total_style_tested > 0:
+                        success_rate = (style_valid_count / total_style_tested) * 100
+                        print(f"\nStyle validation pass rate: {success_rate:.1f}%")
+            except Exception as e:
+                # If CSV reading fails, just skip the summary
+                pass
         
         # Display error log if there were any errors
         if error_log:
