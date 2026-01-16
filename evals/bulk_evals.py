@@ -266,6 +266,65 @@ def normalize_step_for_comparison(step: Dict[str, Any]) -> str:
     
     return "|".join(parts)
 
+def normalize_debug_tracing(debug_tracing: Union[Dict, str, Any]) -> str:
+    """
+    Normalize debug_tracing for similarity comparison.
+    Extracts all keys and params, ordering is not important.
+    
+    Args:
+        debug_tracing: The debug_tracing dictionary, string, or parsed dict
+        
+    Returns:
+        Normalized JSON string representation for similarity comparison
+    """
+    try:
+        # Parse if string
+        if isinstance(debug_tracing, str):
+            try:
+                debug_tracing = json.loads(debug_tracing)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    debug_tracing = ast.literal_eval(debug_tracing)
+                except (ValueError, SyntaxError):
+                    return json.dumps({"error": "Could not parse debug_tracing"})
+        
+        if not isinstance(debug_tracing, dict):
+            return json.dumps({"error": "debug_tracing is not a dictionary"})
+        
+        def normalize_value(value: Any) -> Any:
+            """Recursively normalize a value, handling dicts, lists, and primitives."""
+            if isinstance(value, dict):
+                # Sort keys and normalize values
+                normalized_dict = {}
+                for key in sorted(value.keys()):
+                    normalized_dict[key] = normalize_value(value[key])
+                return normalized_dict
+            elif isinstance(value, list):
+                # Normalize each item, then sort if items are comparable
+                normalized_list = [normalize_value(item) for item in value]
+                # Try to sort if all items are dicts or primitives (for consistent ordering)
+                try:
+                    # Only sort if items are simple types or dicts with sortable keys
+                    if normalized_list and all(isinstance(item, (dict, str, int, float, bool, type(None))) for item in normalized_list):
+                        # Sort dicts by their JSON representation, primitives by value
+                        normalized_list.sort(key=lambda x: json.dumps(x, sort_keys=True) if isinstance(x, dict) else str(x))
+                except (TypeError, ValueError):
+                    # If sorting fails, keep original order
+                    pass
+                return normalized_list
+            else:
+                # Return primitive values as-is
+                return value
+        
+        # Normalize the entire debug_tracing structure
+        normalized = normalize_value(debug_tracing)
+        
+        # Return as sorted JSON string for consistent representation
+        return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({"error": f"Error normalizing debug_tracing: {str(e)}"})
+
 def compare_tracing(expected_tracing: Dict[str, Any], actual_tracing: Dict[str, Any]) -> Tuple[str, str]:
     """
     Compare expected and actual tracing steps.
@@ -806,10 +865,39 @@ def send_all_results_to_maxim(
     
     # Filter test_data to only include items that have results
     # This ensures we only send data to Maxim that we have precomputed results for
-    test_data_with_results = [
-        data for data in test_data 
-        if data["input"] in precomputed_results
-    ]
+    # Also extract debug_tracing from expected_output for similarity comparison
+    test_data_with_results = []
+    for data in test_data:
+        if data["input"] in precomputed_results:
+            # Extract and normalize debug_tracing from expected_output
+            expected_output_str = data.get("expected_output", "")
+            try:
+                if isinstance(expected_output_str, str):
+                    try:
+                        expected_dict = json.loads(expected_output_str)
+                    except (json.JSONDecodeError, ValueError):
+                        try:
+                            expected_dict = ast.literal_eval(expected_output_str)
+                        except (ValueError, SyntaxError):
+                            expected_dict = {}
+                else:
+                    expected_dict = expected_output_str
+                
+                # Extract debug_tracing from expected output
+                expected_debug_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+                if expected_debug_tracing:
+                    # Normalize and replace expected_output with just debug_tracing
+                    normalized_expected_tracing = normalize_debug_tracing(expected_debug_tracing)
+                    data_copy = data.copy()
+                    data_copy["expected_output"] = normalized_expected_tracing
+                    test_data_with_results.append(data_copy)
+                else:
+                    # If no debug_tracing in expected, skip this item for similarity comparison
+                    # but still include it for other evaluations
+                    test_data_with_results.append(data)
+            except Exception:
+                # If extraction fails, use original data
+                test_data_with_results.append(data)
     
     print(f"  Filtered test_data: {len(test_data)} -> {len(test_data_with_results)} items with results")
     
@@ -817,17 +905,59 @@ def send_all_results_to_maxim(
         input_key = data["input"]
         if input_key in precomputed_results:
             output = precomputed_results[input_key]
-            # Extract formatted text for Maxim evaluators (Bias, Similarity)
-            # If output.data is a tuple (formatted_string, full_response_dict), use formatted_string
+            # Extract debug_tracing from actual output for similarity comparison
+            # If output.data is a tuple (formatted_string, full_response_dict), use full_response_dict
             if isinstance(output.data, tuple) and len(output.data) == 2:
-                formatted_output, _ = output.data
-                # Return a new YieldedOutput with just the formatted text for Maxim
-                return YieldedOutput(
-                    data=formatted_output,
-                    retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
-                )
+                _, full_response = output.data
+                # Extract and normalize debug_tracing from actual output
+                if isinstance(full_response, dict):
+                    actual_debug_tracing = full_response.get("debug_tracing")
+                    if actual_debug_tracing:
+                        normalized_actual_tracing = normalize_debug_tracing(actual_debug_tracing)
+                        # Return normalized debug_tracing for similarity comparison
+                        return YieldedOutput(
+                            data=normalized_actual_tracing,
+                            retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+                        )
+                    else:
+                        # If no debug_tracing, return formatted output as fallback
+                        formatted_output, _ = output.data
+                        return YieldedOutput(
+                            data=formatted_output,
+                            retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+                        )
+                else:
+                    # Fallback to formatted output
+                    formatted_output, _ = output.data
+                    return YieldedOutput(
+                        data=formatted_output,
+                        retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+                    )
             else:
-                # Return as-is if not a tuple
+                # Try to extract debug_tracing from string output
+                try:
+                    if isinstance(output.data, str):
+                        try:
+                            actual_dict = json.loads(output.data)
+                        except (json.JSONDecodeError, ValueError):
+                            try:
+                                actual_dict = ast.literal_eval(output.data)
+                            except (ValueError, SyntaxError):
+                                # Return as-is if parsing fails
+                                return output
+                        
+                        if isinstance(actual_dict, dict):
+                            actual_debug_tracing = actual_dict.get("debug_tracing")
+                            if actual_debug_tracing:
+                                normalized_actual_tracing = normalize_debug_tracing(actual_debug_tracing)
+                                return YieldedOutput(
+                                    data=normalized_actual_tracing,
+                                    retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+                                )
+                except Exception:
+                    pass
+                
+                # Return as-is if not a tuple and no debug_tracing found
                 return output
         else:
             return YieldedOutput(
@@ -863,8 +993,44 @@ def send_all_results_to_maxim(
             print("⚠️  Maxim returned None - likely a server error")
             return None
     except Exception as e:
-        print(f"⚠️  Failed to send results to Maxim: {e}")
-        return None
+        error_str = str(e)
+        # If the error is about Ragas Context Precision not being available, try without it
+        if "Ragas Context Precision" in error_str or "Failed to fetch evaluator" in error_str:
+            print(f"⚠️  {error_str}")
+            print("  Retrying without 'Ragas Context Precision' evaluator...")
+            try:
+                with suppress_maxim_logs():
+                    result = (
+                        maxim_client.create_test_run(
+                            name="Local Agent Endpoint Test", 
+                            in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
+                        )
+                        .with_data_structure(
+                            {
+                                "input": "INPUT",
+                                "expected_output": "EXPECTED_OUTPUT",
+                                "context": "CONTEXT_TO_EVALUATE",
+                            }
+                        )
+                        .with_data(test_data_with_results)
+                        .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
+                        .yields_output(get_precomputed_result)
+                        .run()
+                    )
+                
+                if result is not None and result.test_run_result is not None:
+                    test_run_id = result.test_run_result.link.split('/')[-1]
+                    print("  ✓ Successfully created test run without 'Ragas Context Precision'")
+                    return test_run_id
+                else:
+                    print("⚠️  Maxim returned None on retry - likely a server error")
+                    return None
+            except Exception as retry_e:
+                print(f"⚠️  Failed to send results to Maxim on retry: {retry_e}")
+                return None
+        else:
+            print(f"⚠️  Failed to send results to Maxim: {e}")
+            return None
 
 
 def initialize_raw_csv(csv_filename: str) -> None:
@@ -930,6 +1096,12 @@ def append_batch_to_csv(
             schema_errors_csv = schema_errors.replace('\n', '\\n') if schema_errors else ""
             tracing_errors_csv = tracing_errors.replace('\n', '\\n') if tracing_errors else ""
             
+            # Calculate similarity from debug_tracing comparison
+            # Similarity compares debug_tracings, which is what tracing_valid does
+            # So use tracing_valid as initial similarity indicator
+            # Maxim evaluation will override this with semantic similarity if available
+            initial_similarity = tracing_valid if tracing_valid in ("yes", "no") else "no"
+            
             writer.writerow({
                 'input': data['input'],
                 'expected_output': data['expected_output'],
@@ -941,7 +1113,7 @@ def append_batch_to_csv(
                 'style_valid': '',  # Will be filled by Maxim later
                 'style_errors': '',  # Will be filled by Maxim later
                 'bias': '',  # Will be filled by Maxim later
-                'similarity': ''  # Will be filled by Maxim later
+                'similarity': initial_similarity  # Initial similarity based on tracing validation, Maxim will override if available
             })
 
 
@@ -966,50 +1138,130 @@ def send_batch_to_maxim_background(
     for data, output in batch_results:
         precomputed_results[data["input"]] = output
     
+    # Create lookup for original expected_output (needed for style validation)
+    original_expected_output_lookup = {}
+    for data in batch_data:
+        original_expected_output_lookup[data["input"]] = data.get("expected_output", "")
+    
+    # Extract and normalize debug_tracing from expected_output for similarity comparison
+    batch_data_with_tracing = []
+    for data in batch_data:
+        expected_output_str = data.get("expected_output", "")
+        try:
+            if isinstance(expected_output_str, str):
+                try:
+                    expected_dict = json.loads(expected_output_str)
+                except (json.JSONDecodeError, ValueError):
+                    try:
+                        expected_dict = ast.literal_eval(expected_output_str)
+                    except (ValueError, SyntaxError):
+                        expected_dict = {}
+            else:
+                expected_dict = expected_output_str
+            
+            # Extract debug_tracing from expected output
+            expected_debug_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+            if expected_debug_tracing:
+                # Normalize and replace expected_output with just debug_tracing
+                normalized_expected_tracing = normalize_debug_tracing(expected_debug_tracing)
+                data_copy = data.copy()
+                data_copy["expected_output"] = normalized_expected_tracing
+                batch_data_with_tracing.append(data_copy)
+            else:
+                # If no debug_tracing in expected, skip this item for similarity comparison
+                # but still include it for other evaluations
+                batch_data_with_tracing.append(data)
+        except Exception:
+            # If extraction fails, use original data
+            batch_data_with_tracing.append(data)
+    
     def get_precomputed_result(data):
         input_key = data["input"]
         if input_key in precomputed_results:
             output = precomputed_results[input_key]
-            # Extract formatted text for Maxim evaluators (Bias, Similarity)
-            # If output.data is a tuple (formatted_string, full_response_dict), use formatted_string
+            # Extract debug_tracing from actual output for similarity comparison
+            # If output.data is a tuple (formatted_string, full_response_dict), use full_response_dict
             if isinstance(output.data, tuple) and len(output.data) == 2:
                 formatted_output, full_response = output.data
                 
-                # Extract output_type info for style validation
+                # Extract and normalize debug_tracing from actual output
+                normalized_actual_tracing = None
+                if isinstance(full_response, dict):
+                    actual_debug_tracing = full_response.get("debug_tracing")
+                    if actual_debug_tracing:
+                        normalized_actual_tracing = normalize_debug_tracing(actual_debug_tracing)
+                
+                # Extract output_type info for style validation (keep for context evaluation)
                 try:
                     # Parse expected_output to extract style info
-                    expected_output_str = data.get("expected_output", "")
-                    if isinstance(expected_output_str, str):
-                        try:
-                            expected_dict = json.loads(expected_output_str)
-                        except (json.JSONDecodeError, ValueError):
+                    # Note: data["expected_output"] now contains normalized debug_tracing
+                    # Need to get original expected_output from the lookup
+                    original_expected_output_str = original_expected_output_lookup.get(input_key)
+                    
+                    if original_expected_output_str:
+                        if isinstance(original_expected_output_str, str):
                             try:
-                                expected_dict = ast.literal_eval(expected_output_str)
-                            except (ValueError, SyntaxError):
-                                expected_dict = {}
+                                expected_dict = json.loads(original_expected_output_str)
+                            except (json.JSONDecodeError, ValueError):
+                                try:
+                                    expected_dict = ast.literal_eval(original_expected_output_str)
+                                except (ValueError, SyntaxError):
+                                    expected_dict = {}
+                        else:
+                            expected_dict = original_expected_output_str
+                        
+                        expected_info = extract_output_type_info(expected_dict)
+                        actual_info = extract_output_type_info(full_response if isinstance(full_response, dict) else {})
+                        
+                        # Format style comparison for Maxim semantic evaluation
+                        style_comparison = format_style_comparison_for_maxim(expected_info, actual_info)
+                        
+                        # Add to context for Maxim to evaluate
+                        existing_context = output.retrieved_context_to_evaluate or ""
+                        combined_context = f"{existing_context}\n\n{style_comparison}" if existing_context else style_comparison
                     else:
-                        expected_dict = expected_output_str
-                    
-                    expected_info = extract_output_type_info(expected_dict)
-                    actual_info = extract_output_type_info(full_response if isinstance(full_response, dict) else {})
-                    
-                    # Format style comparison for Maxim semantic evaluation
-                    style_comparison = format_style_comparison_for_maxim(expected_info, actual_info)
-                    
-                    # Add to context for Maxim to evaluate
-                    existing_context = output.retrieved_context_to_evaluate or ""
-                    combined_context = f"{existing_context}\n\n{style_comparison}" if existing_context else style_comparison
+                        combined_context = output.retrieved_context_to_evaluate
                 except Exception:
                     # If style extraction fails, use existing context
                     combined_context = output.retrieved_context_to_evaluate
                 
-                # Return a new YieldedOutput with formatted text and style validation context
-                return YieldedOutput(
-                    data=formatted_output,
-                    retrieved_context_to_evaluate=combined_context,
-                )
+                # Return normalized debug_tracing for similarity comparison
+                if normalized_actual_tracing:
+                    return YieldedOutput(
+                        data=normalized_actual_tracing,
+                        retrieved_context_to_evaluate=combined_context,
+                    )
+                else:
+                    # Fallback to formatted output if no debug_tracing
+                    return YieldedOutput(
+                        data=formatted_output,
+                        retrieved_context_to_evaluate=combined_context,
+                    )
             else:
-                # Return as-is if not a tuple
+                # Try to extract debug_tracing from string output
+                try:
+                    if isinstance(output.data, str):
+                        try:
+                            actual_dict = json.loads(output.data)
+                        except (json.JSONDecodeError, ValueError):
+                            try:
+                                actual_dict = ast.literal_eval(output.data)
+                            except (ValueError, SyntaxError):
+                                # Return as-is if parsing fails
+                                return output
+                        
+                        if isinstance(actual_dict, dict):
+                            actual_debug_tracing = actual_dict.get("debug_tracing")
+                            if actual_debug_tracing:
+                                normalized_actual_tracing = normalize_debug_tracing(actual_debug_tracing)
+                                return YieldedOutput(
+                                    data=normalized_actual_tracing,
+                                    retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+                                )
+                except Exception:
+                    pass
+                
+                # Return as-is if not a tuple and no debug_tracing found
                 return output
         else:
             return YieldedOutput(
@@ -1031,7 +1283,7 @@ def send_batch_to_maxim_background(
                         "context": "CONTEXT_TO_EVALUATE",
                     }
                 )
-                .with_data(batch_data)
+                .with_data(batch_data_with_tracing)
                 .with_evaluators("Bias", "Ragas Answer Semantic Similarity", "Ragas Context Precision")
                 .yields_output(get_precomputed_result)
                 .run()
@@ -1043,8 +1295,43 @@ def send_batch_to_maxim_background(
         else:
             return None
     except Exception as e:
-        print(f"  ⚠️  Maxim error for batch {batch_number}: {e}")
-        return None
+        error_str = str(e)
+        # If the error is about Ragas Context Precision not being available, try without it
+        if "Ragas Context Precision" in error_str or "Failed to fetch evaluator" in error_str:
+            print(f"  ⚠️  Maxim error for batch {batch_number}: {error_str}")
+            print(f"  Retrying batch {batch_number} without 'Ragas Context Precision' evaluator...")
+            try:
+                with suppress_maxim_logs():
+                    result = (
+                        maxim_client.create_test_run(
+                            name=f"Local Agent Endpoint Test - Batch {batch_number}", 
+                            in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
+                        )
+                        .with_data_structure(
+                            {
+                                "input": "INPUT",
+                                "expected_output": "EXPECTED_OUTPUT",
+                                "context": "CONTEXT_TO_EVALUATE",
+                            }
+                        )
+                        .with_data(batch_data_with_tracing)
+                        .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
+                        .yields_output(get_precomputed_result)
+                        .run()
+                    )
+                
+                if result is not None and result.test_run_result is not None:
+                    test_run_id = result.test_run_result.link.split('/')[-1]
+                    print(f"  ✓ Successfully created test run for batch {batch_number} without 'Ragas Context Precision'")
+                    return test_run_id
+                else:
+                    return None
+            except Exception as retry_e:
+                print(f"  ⚠️  Maxim error for batch {batch_number} on retry: {retry_e}")
+                return None
+        else:
+            print(f"  ⚠️  Maxim error for batch {batch_number}: {e}")
+            return None
 
 
 def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str]) -> str:
@@ -1141,10 +1428,62 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     if duplicate_count > 0:
         print(f"  ⚠️  Found {duplicate_count} duplicate inputs (kept latest scores)")
     
+    # Helper function to calculate similarity from debug_tracing comparison
+    def calculate_similarity_from_tracing(expected_output_str: str, actual_output_str: str) -> str:
+        """Calculate similarity by comparing normalized debug_tracing from expected and actual outputs."""
+        try:
+            # Parse expected_output
+            if isinstance(expected_output_str, str):
+                try:
+                    expected_dict = json.loads(expected_output_str)
+                except (json.JSONDecodeError, ValueError):
+                    try:
+                        expected_dict = ast.literal_eval(expected_output_str)
+                    except (ValueError, SyntaxError):
+                        return "error"
+            else:
+                expected_dict = expected_output_str
+            
+            # Parse actual_output
+            if isinstance(actual_output_str, str):
+                try:
+                    actual_dict = json.loads(actual_output_str)
+                except (json.JSONDecodeError, ValueError):
+                    try:
+                        actual_dict = ast.literal_eval(actual_output_str)
+                    except (ValueError, SyntaxError):
+                        return "error"
+            else:
+                actual_dict = actual_output_str
+            
+            # Extract debug_tracing from both
+            expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+            actual_tracing = actual_dict.get("debug_tracing") if isinstance(actual_dict, dict) else None
+            
+            if not expected_tracing or not actual_tracing:
+                return "skipped"
+            
+            # Normalize both debug_tracing for comparison
+            normalized_expected = normalize_debug_tracing(expected_tracing)
+            normalized_actual = normalize_debug_tracing(actual_tracing)
+            
+            # Compare normalized strings - if they match exactly, similarity is "yes"
+            # Otherwise, use tracing validation result as a proxy
+            if normalized_expected == normalized_actual:
+                return "yes"
+            else:
+                # Use tracing validation as similarity indicator
+                # If tracing validation passed, similarity is likely high
+                # This is a fallback when Maxim evaluation is not available
+                return "partial"
+        except Exception:
+            return "error"
+    
     # Read the raw CSV and update with scores
     updated_rows = []
     matched_count = 0
     unmatched_inputs = []
+    similarity_calculated_count = 0
     
     with open(raw_csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
@@ -1190,6 +1529,36 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                     # Try to find partial match for debugging
                     if len(unmatched_inputs) < 10:  # Show more unmatched for debugging
                         unmatched_inputs.append(input_text)
+            
+            # If similarity is still empty or only whitespace, calculate it from debug_tracing comparison
+            if not row.get('similarity') or not row.get('similarity').strip():
+                calculated_similarity = calculate_similarity_from_tracing(
+                    row.get('expected_output', ''),
+                    row.get('actual_output', '')
+                )
+                # Use calculated similarity if it's "yes", otherwise use tracing_valid as indicator
+                if calculated_similarity == "yes":
+                    row['similarity'] = "yes"
+                elif calculated_similarity == "error":
+                    # If calculation failed, use tracing_valid as fallback
+                    tracing_valid = row.get('tracing_valid', '').strip().lower()
+                    row['similarity'] = "yes" if tracing_valid == "yes" else "no"
+                else:
+                    # For "partial" or "skipped", use tracing_valid as the indicator
+                    # Since similarity should compare debug_tracings, and tracing_valid does that,
+                    # we can use tracing_valid as a proxy for similarity
+                    tracing_valid = row.get('tracing_valid', '').strip().lower()
+                    if tracing_valid == "yes":
+                        # Tracing steps match, so debug_tracings are similar
+                        row['similarity'] = "yes"
+                    elif tracing_valid == "no":
+                        # Tracing steps don't match, so debug_tracings are different
+                        row['similarity'] = "no"
+                    else:
+                        # tracing_valid is "skipped" or "error"
+                        row['similarity'] = "no"  # Default to "no" if uncertain
+                similarity_calculated_count += 1
+            
             updated_rows.append(row)
     
     # Debug: show sample of lookup keys vs CSV inputs if no matches
@@ -1231,6 +1600,8 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
         writer.writerows(updated_rows)
     
     print(f"\n✓ Updated {matched_count}/{len(updated_rows)} rows with Maxim scores")
+    if similarity_calculated_count > 0:
+        print(f"  Calculated similarity from debug_tracing for {similarity_calculated_count} rows (Maxim scores not available)")
     
     return raw_csv_filename
 
