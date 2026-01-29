@@ -575,12 +575,15 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     Load test data from a CSV file with columns: input, expected_output
     (case-insensitive - accepts Input/Expected_output or input/expected_output)
     Skips blank rows and rows with empty input or expected_output.
+    
+    If input_id column exists, rows with the same input_id will share the same
+    conversation_id, allowing them to be part of the same conversation context.
 
     Args:
         csv_file_path: Path to the CSV file
 
     Returns:
-        List of test data dictionaries
+        List of test data dictionaries with conversation_id for multi-turn conversations
     """
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
@@ -611,14 +614,40 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     if skipped_count > 0:
         print(f"⚠️  Skipped {skipped_count} blank/invalid rows from CSV")
 
+    # Check if input_id column exists for conversation grouping
+    has_input_id = "input_id" in df.columns
+    
+    # Create a mapping from input_id to conversation_id (UUID)
+    input_id_to_conversation_id = {}
+    
+    if has_input_id:
+        # Get unique input_ids and generate a conversation_id for each
+        unique_input_ids = df["input_id"].unique()
+        for input_id in unique_input_ids:
+            input_id_to_conversation_id[input_id] = str(uuid.uuid4())
+        print(f"📝 Found {len(unique_input_ids)} unique conversations (input_id groups)")
+
     # Convert to list of dictionaries
     test_data = []
     for _, row in df.iterrows():
-        test_data.append({
+        data_item = {
             "input": str(row["input"]).strip(),
             "expected_output": str(row["expected_output"]).strip(),
             "context": "",  # Optional context column, default to empty
-        })
+        }
+        
+        # Add conversation_id based on input_id (or generate new one if no input_id)
+        if has_input_id:
+            input_id = row["input_id"]
+            data_item["conversation_id"] = input_id_to_conversation_id[input_id]
+            data_item["input_id"] = input_id  # Keep original input_id for sorting
+        else:
+            # Each row gets its own conversation_id if no input_id column
+            data_item["conversation_id"] = str(uuid.uuid4())
+            data_item["input_id"] = None
+        
+        test_data.append(data_item)
+    
     return test_data
 
 
@@ -630,7 +659,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
     """Function to call your local agent endpoint using Adopt API
     
     Args:
-        data: Input data dictionary
+        data: Input data dictionary (should contain conversation_id for multi-turn conversations)
         profile: Adopt profile configuration
         access_token: Authentication token
         exclude_fields: List of field names to exclude from the response
@@ -638,8 +667,9 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         max_items: Optional maximum number of items to keep in arrays/lists (e.g., 5 for first 5 items)
     """
     try:
-        # Generate a unique trace ID for this prompt to create a new conversation context
-        trace_id = str(uuid.uuid4())
+        # Use conversation_id from data as trace_id to maintain conversation context
+        # Rows with the same input_id will share the same conversation_id/trace_id
+        trace_id = data.get("conversation_id") or str(uuid.uuid4())
         
         # Modify the input to include max_items instruction if specified
         modified_input = data["input"]
@@ -873,6 +903,7 @@ def send_all_results_to_maxim(
     # Filter test_data to only include items that have results
     # This ensures we only send data to Maxim that we have precomputed results for
     # Also extract debug_tracing from expected_output for similarity comparison
+    # IMPORTANT: Remove conversation_id and input_id - these should NOT be sent to Maxim
     test_data_with_results = []
     for data in test_data:
         if data["input"] in precomputed_results:
@@ -895,16 +926,31 @@ def send_all_results_to_maxim(
                 if expected_debug_tracing:
                     # Normalize and replace expected_output with just debug_tracing
                     normalized_expected_tracing = normalize_debug_tracing(expected_debug_tracing)
-                    data_copy = data.copy()
-                    data_copy["expected_output"] = normalized_expected_tracing
+                    # Create clean data copy without conversation_id and input_id
+                    data_copy = {
+                        "input": data["input"],
+                        "expected_output": normalized_expected_tracing,
+                        "context": data.get("context", ""),
+                    }
                     test_data_with_results.append(data_copy)
                 else:
                     # If no debug_tracing in expected, skip this item for similarity comparison
                     # but still include it for other evaluations
-                    test_data_with_results.append(data)
+                    # Create clean data copy without conversation_id and input_id
+                    data_copy = {
+                        "input": data["input"],
+                        "expected_output": data.get("expected_output", ""),
+                        "context": data.get("context", ""),
+                    }
+                    test_data_with_results.append(data_copy)
             except Exception:
-                # If extraction fails, use original data
-                test_data_with_results.append(data)
+                # If extraction fails, use original data (without conversation_id and input_id)
+                data_copy = {
+                    "input": data["input"],
+                    "expected_output": data.get("expected_output", ""),
+                    "context": data.get("context", ""),
+                }
+                test_data_with_results.append(data_copy)
     
     print(f"  Filtered test_data: {len(test_data)} -> {len(test_data_with_results)} items with results")
     
@@ -1051,6 +1097,7 @@ def send_content_similarity_to_maxim(
         precomputed_results[data["input"]] = output
     
     # Prepare test data with message content extracted from expected_output
+    # IMPORTANT: Only include input, expected_output, context - do NOT send conversation_id or input_id to Maxim
     test_data_with_content = []
     for data in test_data:
         if data["input"] in precomputed_results:
@@ -1058,8 +1105,12 @@ def send_content_similarity_to_maxim(
             expected_output_str = data.get("expected_output", "")
             expected_message_content = extract_message_content(expected_output_str)
             
-            data_copy = data.copy()
-            data_copy["expected_output"] = expected_message_content
+            # Create clean data copy without conversation_id and input_id
+            data_copy = {
+                "input": data["input"],
+                "expected_output": expected_message_content,
+                "context": data.get("context", ""),
+            }
             test_data_with_content.append(data_copy)
     
     print(f"  Prepared {len(test_data_with_content)} items for content similarity evaluation")
@@ -1127,11 +1178,47 @@ def initialize_raw_csv(csv_filename: str) -> None:
     import csv
     
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+        fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
     
     print(f"📄 Initialized raw results CSV: {csv_filename}")
+
+
+def sort_csv_by_conversation_id(csv_filename: str) -> None:
+    """Sort a CSV file by conversation_id to group related conversations together.
+    
+    Args:
+        csv_filename: Path to the CSV file to sort
+    """
+    import csv
+    
+    if not os.path.exists(csv_filename):
+        print(f"⚠️  Cannot sort: file not found: {csv_filename}")
+        return
+    
+    # Read all rows
+    rows = []
+    fieldnames = None
+    with open(csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    
+    if not rows:
+        print(f"⚠️  Cannot sort: no data in file: {csv_filename}")
+        return
+    
+    # Sort by conversation_id
+    rows.sort(key=lambda r: r.get('conversation_id', ''))
+    
+    # Write back sorted rows
+    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    
+    print(f"📋 Sorted {len(rows)} rows by conversation_id")
 
 
 def append_batch_to_csv(
@@ -1147,7 +1234,7 @@ def append_batch_to_csv(
     import csv
     
     with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+        fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
         for data, output in batch_results:
@@ -1212,6 +1299,7 @@ def append_batch_to_csv(
                 initial_similarity = ""
             
             writer.writerow({
+                'conversation_id': data.get('conversation_id', ''),
                 'input': data['input'],
                 'expected_output': data['expected_output'],
                 'actual_output': actual_output,
@@ -1774,7 +1862,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str],
     
     # Write updated data back
     # Preserve schema_valid, schema_errors, tracing_valid, and tracing_errors if they exist in the rows
-    all_fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+    all_fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
     # Check what fields actually exist in the rows (for backward compatibility)
     if updated_rows:
         existing_fields = set(updated_rows[0].keys())
@@ -1902,6 +1990,21 @@ def generate_final_csv_from_test_run(
         print(f"Expected Entries: {expected_count}")
     print()
     
+    # Read existing raw CSV to get input -> conversation_id mapping (we don't send conversation_id to Maxim)
+    conversation_id_lookup = {}
+    if os.path.exists(output_filename):
+        try:
+            with open(output_filename, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    input_text = row.get('input', '').strip()
+                    conv_id = row.get('conversation_id', '')
+                    if input_text and conv_id:
+                        conversation_id_lookup[input_text] = conv_id
+            print(f"📝 Loaded {len(conversation_id_lookup)} conversation_id mappings from existing CSV")
+        except Exception as e:
+            print(f"⚠️  Could not load conversation_id mappings: {e}")
+    
     # Fetch ALL entries from content similarity test run
     print("📥 Fetching entries from content similarity test run...")
     content_entries = fetch_test_run_entries_paginated(
@@ -2019,7 +2122,11 @@ def generate_final_csv_from_test_run(
                 tracing_errors = 'No debug_tracing found in expected_output'
                 tracing_similarity = ''
             
+            # Get conversation_id from lookup (we preserve it from the raw CSV since Maxim doesn't store it)
+            conversation_id = conversation_id_lookup.get(input_text.strip(), '')
+            
             row = {
+                'conversation_id': conversation_id,
                 'input': input_text,
                 'expected_output': expected_output,
                 'actual_output': actual_output,
@@ -2042,8 +2149,12 @@ def generate_final_csv_from_test_run(
             print(f"  ⚠️  Error processing entry {idx}: {e}")
             continue
     
+    # Sort rows by conversation_id to group related conversations together
+    rows.sort(key=lambda r: r.get('conversation_id', ''))
+    print(f"📋 Sorted {len(rows)} rows by conversation_id")
+    
     # Write CSV
-    fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 
+    fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 
                   'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
     
     print(f"\n💾 Writing {len(rows)} rows to: {output_filename}")
@@ -2448,6 +2559,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
                 tracing_similarity = ""
             
             all_csv_data.append({
+                'conversation_id': '',  # Not available when fetching from Maxim historical runs
                 'input': input_text,
                 'expected_output': expected_output,
                 'actual_output': actual_output_escaped,
@@ -2467,7 +2579,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
     # Write to CSV file
     try:
         with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+            fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
@@ -2784,6 +2896,10 @@ Examples:
             print(f"\n{'='*50}")
             print(f"SKIPPING MAXIM EVALUATION (--skip-maxim flag is set)")
             print(f"{'='*50}")
+            
+            # Sort the CSV by conversation_id to group related conversations together
+            sort_csv_by_conversation_id(raw_csv_filename)
+            
             print(f"📄 Raw results saved to: {raw_csv_filename}")
             print(f"⚠️  Maxim evaluation skipped - no scores added")
         else:
