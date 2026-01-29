@@ -13,6 +13,8 @@ The `evals` package allows you to:
 - **Optimized Performance**: Reuses authentication tokens for faster bulk evaluations
 - **Custom Field Filtering**: Exclude unwanted fields from responses for cleaner evaluations
 - **Flexible Configuration**: Command-line options for custom CSV files and field exclusion
+- **Multi-turn Conversations**: Support for testing conversation flows with `input_id` grouping
+- **Cache Bypass**: Option to bypass LLM caching for fresh responses on each run
 
 ## Setup
 
@@ -49,6 +51,31 @@ Input,Expected_output
 
 **Note:** Use quotes around multi-line content and `\n` for newlines in expected output.
 
+#### Multi-turn Conversation Testing
+
+For testing conversation flows where follow-up questions depend on previous context, use the `input_id` column:
+
+```csv
+input_id,Input,Expected_output
+1,Can you get me the active agreements with value >5K,Hello there
+1,Just get me the long terms ones expiring next year,Hello there
+1,Are they all spendflo procured?,Hello there
+2,Give me the pricing details for Lovable,Hello there
+2,What is the agreement type for it,Hello there
+3,Get me the list of overdue renewals,Hello there
+```
+
+**How it works:**
+- Rows with the **same `input_id`** are treated as part of the same conversation
+- They share the same `conversation_id` and trace context
+- The LLM maintains context across turns within the same conversation
+- Results are automatically sorted and grouped by `conversation_id`
+
+**Use cases:**
+- Testing follow-up questions that reference previous results ("filter those by...", "sort them by...")
+- Validating conversation context is maintained across turns
+- Testing disambiguation flows ("which one?", "the first one")
+
 ### 2. Run Evaluation
 
 **Basic Usage:**
@@ -81,6 +108,9 @@ poetry run python evals/bulk_evals.py --skip-maxim
 
 # Run Maxim evaluation on existing results
 poetry run python evals/bulk_evals.py --maxim-only evals/evaluation_results_20260126_143022.csv
+
+# Bypass LLM caching for fresh responses
+poetry run python evals/bulk_evals.py --no-cache
 
 # Full customization
 poetry run python evals/bulk_evals.py \
@@ -145,6 +175,9 @@ When not using `--skip-maxim`, the system also runs:
 
 The generated CSV contains comprehensive evaluation results:
 
+**Conversation tracking:**
+- **`conversation_id`**: Unique identifier for the conversation. Rows with the same `input_id` in the source CSV share the same `conversation_id`. Results are sorted/grouped by this field.
+
 **Input columns:**
 - **`input`**: Original test input query
 - **`expected_output`**: Expected response (with escaped newlines)
@@ -178,6 +211,7 @@ The bulk evaluation script supports the following command-line arguments:
 | `--max-retries` | `int` | Maximum retry attempts for 503/504 HTTP errors | `3` |
 | `--skip-maxim` | flag | Skip all Maxim evaluation runs. Results saved to CSV without Maxim scores | `False` |
 | `--maxim-only` | `str` | Skip batch processing and only run Maxim eval on existing CSV file | None |
+| `--no-cache` | flag | Bypass LLM caching by appending unique request IDs to inputs | `False` |
 
 **Examples:**
 ```bash
@@ -260,6 +294,81 @@ python evals/bulk_evals.py --maxim-only evals/evaluation_results_20260126_143022
 - You have CSV results from a previous run
 - Want to add Maxim scores without re-running agents
 - Testing different Maxim evaluator configurations
+
+## Multi-turn Conversation Support
+
+The evaluation system supports testing multi-turn conversations where follow-up questions depend on previous context.
+
+### How It Works
+
+1. **Input CSV with `input_id`:** Add an `input_id` column to group related conversation turns:
+   ```csv
+   input_id,Input,Expected_output
+   1,Show me all active agreements,Expected response...
+   1,Filter by value greater than 5K,Expected response...
+   1,Sort them by expiry date,Expected response...
+   2,Get pricing details for Salesforce,Expected response...
+   2,Compare with last year's pricing,Expected response...
+   ```
+
+2. **Conversation ID Generation:** 
+   - The system generates a unique `conversation_id` (UUID) for each unique `input_id`
+   - All rows with the same `input_id` share the same `conversation_id`
+   - This `conversation_id` is used as the trace ID when calling the API
+
+3. **Context Preservation:**
+   - The LLM maintains conversation context across turns
+   - Follow-up questions can reference previous results
+   - "Filter those...", "Sort them...", "Which one?" all work correctly
+
+4. **Results Grouping:**
+   - Output CSV includes `conversation_id` as the first column
+   - Results are automatically sorted by `conversation_id`
+   - Related conversation turns appear together
+
+### Example Workflow
+
+```bash
+# Test multi-turn conversations
+python evals/bulk_evals.py --csv-file evals/SF-multi-convo.csv --skip-maxim
+
+# Output will be grouped by conversation:
+# conversation_id | input                                    | ...
+# abc123...       | Show me all active agreements            | ...
+# abc123...       | Filter by value greater than 5K          | ...
+# abc123...       | Sort them by expiry date                 | ...
+# def456...       | Get pricing details for Salesforce       | ...
+# def456...       | Compare with last year's pricing         | ...
+```
+
+## Cache Bypass (--no-cache)
+
+LLMs often cache responses for identical inputs. Use `--no-cache` to ensure fresh responses:
+
+```bash
+python evals/bulk_evals.py --no-cache
+```
+
+### How It Works
+
+When enabled, a unique request ID is appended to each input:
+
+```
+Your original input here
+
+[request_id: a1b2c3d4]
+```
+
+**Benefits:**
+- Forces the LLM to process each request as new
+- Useful for testing response consistency
+- Ensures evaluations reflect current model behavior
+- The request ID is formatted as metadata and doesn't affect semantic meaning
+
+**When to use:**
+- Running the same test suite multiple times
+- Testing for response consistency/variance
+- Ensuring no stale cached responses affect results
 
 
 ## Best Practices
@@ -356,6 +465,17 @@ python evals/bulk_evals.py --batch-size 5 --max-retries 5
 python evals/bulk_evals.py --max-items 5 --exclude-fields metadata,debug_info
 ```
 
+**Problem:** Follow-up questions losing context
+- Make sure rows have the same `input_id` value in the CSV
+- Verify the CSV has the `input_id` column header (case-insensitive)
+- Check that conversation_id in results shows same value for related turns
+
+**Problem:** Getting cached/stale responses
+```bash
+# Solution: Use cache bypass
+python evals/bulk_evals.py --no-cache
+```
+
 ## File Structure
 
 ```
@@ -363,7 +483,8 @@ evals/
 ├── README.md                    # This documentation
 ├── bulk_evals.py               # Main evaluation script with CLI support
 ├── test_data.csv               # Sample test data (Input, Expected_output)
-└── evaluation_results_*.csv    # Generated results (timestamped)
+├── SF-multi-convo.csv          # Example multi-turn conversation test data (input_id, Input, Expected_output)
+└── evaluation_results_*.csv    # Generated results (timestamped, grouped by conversation_id)
 ```
 
 ## Integration with AdoptXchange
@@ -393,6 +514,12 @@ python evals/bulk_evals.py --exclude-fields header_message,footer_message,id,tim
 # Use custom test data
 python evals/bulk_evals.py --csv-file my_tests.csv
 
+# Multi-turn conversation testing
+python evals/bulk_evals.py --csv-file evals/SF-multi-convo.csv
+
+# Bypass LLM caching for fresh responses
+python evals/bulk_evals.py --no-cache
+
 # Performance-optimized configuration
 python evals/bulk_evals.py \
   --timeout 30.0 \
@@ -410,7 +537,8 @@ python evals/bulk_evals.py \
   --timeout 45.0 \
   --max-items 20 \
   --batch-size 10 \
-  --max-retries 5
+  --max-retries 5 \
+  --no-cache
 ```
 
 ### Field Exclusion Tips
