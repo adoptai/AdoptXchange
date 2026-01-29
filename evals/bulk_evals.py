@@ -655,7 +655,7 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
 default_csv_file_path = "evals/test_data.csv"
 
 
-def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None, max_items: int = None):
+def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None, max_items: int = None, no_cache: bool = False):
     """Function to call your local agent endpoint using Adopt API
     
     Args:
@@ -665,6 +665,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         exclude_fields: List of field names to exclude from the response
         timeout: Optional timeout in seconds. If the call takes longer, returns "timed out"
         max_items: Optional maximum number of items to keep in arrays/lists (e.g., 5 for first 5 items)
+        no_cache: If True, append a unique request ID to bypass LLM caching
     """
     try:
         # Use conversation_id from data as trace_id to maintain conversation context
@@ -673,9 +674,16 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         
         # Modify the input to include max_items instruction if specified
         modified_input = data["input"]
+        
+        # Bypass LLM caching by appending a unique request ID
+        # This is added as invisible metadata that doesn't change the semantic meaning
+        if no_cache:
+            request_id = str(uuid.uuid4())[:8]  # Short unique ID
+            modified_input = f"{modified_input}\n\n[request_id: {request_id}]"
+        
         if max_items is not None and max_items > 0:
             # Append instruction to limit results in the prompt
-            modified_input = f"{data['input']}\n\nPlease limit your response to only the first {max_items} items if returning a list, table, or array of results."
+            modified_input = f"{modified_input}\n\nPlease limit your response to only the first {max_items} items if returning a list, table, or array of results."
         
         # Get full response for schema validation (includes status, message, ai_message, debug_tracing)
         expected_output = data.get("expected_output")
@@ -2686,6 +2694,12 @@ Examples:
         help='Skip all Maxim evaluation runs. Results will still be saved to CSV but without Maxim scores.'
     )
     
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Bypass LLM caching by appending a unique request ID to each input. The ID is added as metadata that does not affect the semantic meaning.'
+    )
+    
     args = parser.parse_args()
     
     # Initialize Maxim SDK only if not skipping
@@ -2797,6 +2811,9 @@ Examples:
     
     print(f"Batch size: {args.batch_size} parallel prompts")
     print(f"Max retries for 503/504 errors: {args.max_retries}")
+    
+    if args.no_cache:
+        print("🔄 Cache bypass enabled: Unique request IDs will be appended to inputs")
 
     # Load the adopt profile configuration once
     profile = load_adopt_profile()
@@ -2809,7 +2826,7 @@ Examples:
     try:
         # Create a wrapper function for calling the agent with profile and settings
         def call_local_agent_with_profile(data):
-            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout, args.max_items)
+            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout, args.max_items, args.no_cache)
         
         print(f"\n{'='*50}")
         print(f"PROCESSING PROMPTS IN BATCHES (max {args.batch_size} parallel)")
