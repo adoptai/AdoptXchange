@@ -135,21 +135,11 @@ Compares the `debug_tracing` workflow steps to ensure the agent followed the cor
 
 **Use case:** Verify that the agent used the right sequence of API calls, tools, or decision steps
 
-### 3. Style Validation
-
-Validates that the response format matches the expected `output_type`:
-
-**How it works:**
-- Checks that actual output uses the correct formatting (table, list, text, JSON, etc.)
-- Validates structure conforms to the specified style
-
-**Use case:** Ensure responses are formatted consistently (e.g., always return tables for data queries)
-
-### 4. Maxim Evaluators (Optional)
+### 3. Maxim Evaluators (Optional)
 
 When not using `--skip-maxim`, the system also runs:
 - **Bias Evaluator**: Detects biased or problematic content (score: 0=no bias, 1=high bias)
-- **Ragas Answer Semantic Similarity**: Measures semantic relevance between expected and actual answers
+- **General LLM Judge**: Uses an LLM to evaluate semantic correctness between expected and actual answers (more accurate than embedding-based similarity)
 
 ## CSV Output Format
 
@@ -167,8 +157,6 @@ The generated CSV contains comprehensive evaluation results:
 - **`schema_errors`**: Detailed schema validation errors (if any)
 - **`tracing_valid`**: Debug tracing validation result ("yes"/"no")
 - **`tracing_errors`**: Detailed tracing comparison errors (if any)
-- **`style_valid`**: Style/format validation result ("yes"/"no")
-- **`style_errors`**: Detailed style validation errors (if any)
 
 **Maxim evaluation columns (if not using --skip-maxim):**
 - **`bias`**: Bias evaluation score (0-1 scale, lower is better)

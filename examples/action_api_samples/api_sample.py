@@ -4,7 +4,8 @@ import argparse
 import json
 import os
 import requests
-from typing import Any, Dict, Sequence
+import ast
+from typing import Any, Dict, Sequence, Optional, Union
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from examples import read_env, AdoptEnv
 from examples.models import AdoptActionListResponse, AdoptActionRunRequest
@@ -12,6 +13,38 @@ from examples.models import AdoptActionListResponse, AdoptActionRunRequest
 def get_adopt_env() -> AdoptEnv:
     """Get the Adopt environment variables."""
     return read_env()
+
+def has_debug_tracing(expected_output: Optional[Union[str, Dict[str, Any]]]) -> bool:
+    """Check if expected_output contains debug_tracing.
+    
+    Args:
+        expected_output: The expected output as a string (JSON/Python dict) or dict
+        
+    Returns:
+        True if debug_tracing is found, False otherwise
+    """
+    if not expected_output:
+        return False
+    
+    try:
+        # Parse expected_output if it's a string
+        if isinstance(expected_output, str):
+            try:
+                expected_dict = json.loads(expected_output)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    expected_dict = ast.literal_eval(expected_output)
+                except (ValueError, SyntaxError):
+                    return False
+        else:
+            expected_dict = expected_output
+        
+        # Check if debug_tracing exists in the parsed dict
+        if isinstance(expected_dict, dict):
+            return "debug_tracing" in expected_dict and expected_dict.get("debug_tracing") is not None
+        return False
+    except Exception:
+        return False
 
 def get_auth_token() -> str:
     """Get authentication token from Adopt API."""
@@ -227,15 +260,28 @@ def run_list_actions_message(profile: Dict[str, Any], access_token: str = None) 
         raise ValueError(f"Action message content is not a list. It is: {type(action_message.content)}") # pyright: ignore
     return str(action_message.content) # pyright: ignore
 
-def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None, trace_id: str = None) -> str:
-    """Test running a specific action via langchain adapter."""
+def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None, trace_id: str = None, expected_output: Optional[Union[str, Dict[str, Any]]] = None) -> str:
+    """Test running a specific action via langchain adapter.
+    
+    Args:
+        messages: Sequence of messages for the action
+        profile: The adopt profile configuration
+        access_token: Optional authentication token to reuse
+        trace_id: Optional trace ID for conversation context
+        expected_output: Optional expected output to check for debug_tracing
+    """
     adopt_env = get_adopt_env()
 
     # Get authentication token if not provided
     if access_token is None:
         access_token = get_auth_token()
-        
-    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run?include_trace=true"
+    
+    # Only include trace parameter if expected_output has debug_tracing
+    base_url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
+    if expected_output and has_debug_tracing(expected_output):
+        url = f"{base_url}?include_trace=true"
+    else:
+        url = base_url
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
@@ -279,7 +325,7 @@ def run_action(messages: Sequence[HumanMessage | AIMessage | SystemMessage], pro
         raise ValueError(f"Action message content is not a list. It is: {type(ai_message.content)}") # pyright: ignore
     return "\n".join(str(item) for item in ai_message.content) # pyright: ignore
 
-def run_action_full_response(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None, trace_id: str = None) -> Dict[str, Any]:
+def run_action_full_response(messages: Sequence[HumanMessage | AIMessage | SystemMessage], profile: Dict[str, Any], access_token: str = None, trace_id: str = None, expected_output: Optional[Union[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Run an action and return the full JSON response including trace.
     
     Similar to run_action but returns the complete response structure instead of just content.
@@ -289,6 +335,7 @@ def run_action_full_response(messages: Sequence[HumanMessage | AIMessage | Syste
         profile: The adopt profile configuration
         access_token: Optional authentication token to reuse
         trace_id: Optional trace ID for conversation context
+        expected_output: Optional expected output to check for debug_tracing
         
     Returns:
         The full JSON response dictionary (includes status, message, ai_message, debug_tracing)
@@ -298,8 +345,13 @@ def run_action_full_response(messages: Sequence[HumanMessage | AIMessage | Syste
     # Get authentication token if not provided
     if access_token is None:
         access_token = get_auth_token()
-        
-    url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run?include_trace=true"
+    
+    # Only include trace parameter if expected_output has debug_tracing
+    base_url = f"{adopt_env.ADOPT_API_ENDPOINT}/v1/actions/run"
+    if expected_output and has_debug_tracing(expected_output):
+        url = f"{base_url}?include_trace=true"
+    else:
+        url = base_url
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
@@ -335,7 +387,7 @@ def run_action_full_response(messages: Sequence[HumanMessage | AIMessage | Syste
 
     return json_response
 
-def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None, trace_id: str = None) -> str:
+def run_simple_action(command: str, profile: Dict[str, Any], access_token: str = None, trace_id: str = None, expected_output: Optional[Union[str, Dict[str, Any]]] = None) -> str:
     """Simple function to run an action with just a command string.
     
     This is a convenience function that creates a HumanMessage from the command
@@ -346,14 +398,15 @@ def run_simple_action(command: str, profile: Dict[str, Any], access_token: str =
         profile: The adopt profile configuration
         access_token: Optional authentication token to reuse
         trace_id: Optional trace ID for conversation context (creates new conversation if provided)
+        expected_output: Optional expected output to check for debug_tracing
         
     Returns:
         The response from the action execution
     """
     messages = [HumanMessage(content=command)]
-    return run_action(messages, profile, access_token, trace_id)
+    return run_action(messages, profile, access_token, trace_id, expected_output)
 
-def run_simple_action_full_response(command: str, profile: Dict[str, Any], access_token: str = None, trace_id: str = None) -> Dict[str, Any]:
+def run_simple_action_full_response(command: str, profile: Dict[str, Any], access_token: str = None, trace_id: str = None, expected_output: Optional[Union[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Simple function to run an action and return the full JSON response.
     
     Args:
@@ -361,12 +414,13 @@ def run_simple_action_full_response(command: str, profile: Dict[str, Any], acces
         profile: The adopt profile configuration
         access_token: Optional authentication token to reuse
         trace_id: Optional trace ID for conversation context
+        expected_output: Optional expected output to check for debug_tracing
         
     Returns:
         The full JSON response dictionary (includes status, message, ai_message, debug_tracing)
     """
     messages = [HumanMessage(content=command)]
-    return run_action_full_response(messages, profile, access_token, trace_id)
+    return run_action_full_response(messages, profile, access_token, trace_id, expected_output)
 
 def run_action_by_id(
     action_id: str,

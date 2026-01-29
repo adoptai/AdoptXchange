@@ -216,7 +216,6 @@ The `evals` package provides comprehensive bulk evaluation functionality for tes
 - **📊 Multiple Validation Modes**:
   - **Schema Validation**: Automatic comparison of response structure vs expected schema
   - **Tracing Validation**: Compares debug_tracing steps for workflow accuracy
-  - **Style Validation**: Ensures output formatting matches expected types
   - **Semantic Similarity**: Maxim evaluators for bias detection and answer relevance
 - **🔧 Advanced Configuration**: Field filtering, timeouts, array limiting, retry logic
 - **💾 Comprehensive Results**: Detailed CSV output with validation scores and error details
@@ -281,9 +280,9 @@ The `evals` package provides comprehensive bulk evaluation functionality for tes
 - `input`, `expected_output`, `actual_output`: Test case and results
 - `schema_valid`, `schema_errors`: Schema structure validation
 - `tracing_valid`, `tracing_errors`: Debug tracing workflow validation
-- `style_valid`, `style_errors`: Output type/formatting validation
 - `bias`: Maxim bias detection score (0-1, lower is better)
-- `similarity`: Maxim semantic similarity (yes/no)
+- `tracing_similarity`: Maxim semantic similarity for tracing (yes/no)
+- `content_similarity`: Maxim semantic similarity for content (yes/no)
 
 #### Examples
 
