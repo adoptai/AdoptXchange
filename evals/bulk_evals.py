@@ -275,33 +275,6 @@ def normalize_step_for_comparison(step: Dict[str, Any]) -> str:
     
     return "|".join(parts)
 
-def calculate_content_similarity(expected_content: str, actual_content: str, threshold: float = 0.7) -> str:
-    """
-    Calculate content similarity using local text comparison.
-    
-    Args:
-        expected_content: Expected message content as string
-        actual_content: Actual message content as string
-        threshold: Similarity threshold (0.0-1.0) for "yes" result (default: 0.7)
-        
-    Returns:
-        "yes" if similarity >= threshold, "no" otherwise
-    """
-    try:
-        if not expected_content or not actual_content:
-            return "no"
-        
-        # Normalize whitespace
-        expected_normalized = " ".join(expected_content.split())
-        actual_normalized = " ".join(actual_content.split())
-        
-        # Calculate similarity ratio using SequenceMatcher
-        similarity_ratio = SequenceMatcher(None, expected_normalized.lower(), actual_normalized.lower()).ratio()
-        
-        return "yes" if similarity_ratio >= threshold else "no"
-    except Exception:
-        return "no"
-
 def extract_message_content(response: Union[Dict, str, Any]) -> str:
     """
     Extract the full message content from a response for content similarity comparison.
