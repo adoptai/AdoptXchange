@@ -15,13 +15,13 @@ def get_adopt_env() -> AdoptEnv:
     return read_env()
 
 def has_debug_tracing(expected_output: Optional[Union[str, Dict[str, Any]]]) -> bool:
-    """Check if expected_output contains debug_tracing.
+    """Check if expected_output contains a non-None debug_tracing field.
     
     Args:
         expected_output: The expected output as a string (JSON/Python dict) or dict
         
     Returns:
-        True if debug_tracing is found, False otherwise
+        True if debug_tracing is present and its value is not None, False otherwise.
     """
     if not expected_output:
         return False
