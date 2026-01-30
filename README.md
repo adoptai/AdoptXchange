@@ -208,42 +208,124 @@ This function automatically:
 
 ### Bulk Evaluations
 
-The `evals` package provides bulk evaluation functionality using the Maxim SDK for comprehensive testing of AdoptXchange agents.
+The `evals` package provides comprehensive bulk evaluation functionality for testing AdoptXchange agents at scale, with automatic schema validation, tracing comparison, and Maxim integration.
 
-#### Features
+#### Key Features
 
-- **CSV Input Support**: Load test cases from CSV files with `Input` and `Expected_output` columns
-- **Maxim Integration**: Automated evaluation using Maxim's evaluation platform
-- **Scalable Testing**: Run hundreds of test cases simultaneously
-- **Performance Metrics**: Detailed evaluation reports and analytics
+- **🚀 High-Performance Testing**: Parallel processing with configurable batch sizes and token reuse
+- **📊 Multiple Validation Modes**:
+  - **Schema Validation**: Automatic comparison of response structure vs expected schema
+  - **Tracing Validation**: Compares debug_tracing steps for workflow accuracy
+  - **Semantic Similarity**: Maxim evaluators for bias detection and answer relevance
+- **🔧 Advanced Configuration**: Field filtering, timeouts, array limiting, retry logic
+- **💾 Comprehensive Results**: Detailed CSV output with validation scores and error details
+- **🎯 Flexible Execution**: Run with or without Maxim, or evaluate existing results
 
 #### Quick Start
 
-1. **Prepare your test data CSV:**
+1. **Prepare your test data CSV** (`evals/test_data.csv`):
    ```csv
    Input,Expected_output
-   What are the benefits of renewable energy?,Renewable energy provides clean, sustainable power sources...
-   How does machine learning work?,Machine learning algorithms learn patterns from data...
+   "List all available actions","[{\"name\":\"Create Segment\",\"description\":\"Creates a new segment\"}]"
+   "Show device management capabilities","Device Management\n- List All Devices\n- Get Location"
    ```
 
-2. **Configure Maxim credentials in `.env`:**
+2. **Configure environment variables in `.env`:**
    ```env
+   # Required for AdoptXchange API
+   ADOPT_CLIENT_ID=your-client-id
+   ADOPT_CLIENT_SECRET=your-client-secret
+   ADOPT_API_ENDPOINT=https://connect.adopt.ai
+   
+   # Required for Maxim evaluation (optional if using --skip-maxim)
    MAXIM_API_KEY=your-maxim-api-key
    MAXIM_WORKSPACE_ID=your-workspace-id
    ```
 
 3. **Run bulk evaluation:**
    ```bash
+   # Basic evaluation with all features
    python -m evals.bulk_evals
+   
+   # With custom CSV and field filtering
+   python -m evals.bulk_evals --csv-file my_tests.csv --exclude-fields header_message,footer_message
+   
+   # Skip Maxim evaluation (faster, local-only validation)
+   python -m evals.bulk_evals --skip-maxim
+   
+   # View all options
+   python -m evals.bulk_evals --help
    ```
 
-#### CSV Format Requirements
+#### Command-Line Options
 
-Your CSV file must contain these columns:
-- **`Input`**: The query or prompt to send to your agent
-- **`Expected_output`**: The expected response for evaluation
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--csv-file PATH` | Path to test data CSV file | `evals/test_data.csv` |
+| `--exclude-fields LIST` | Comma-separated fields to filter from responses | None |
+| `--timeout SECONDS` | Timeout for each agent response | None |
+| `--max-items N` | Limit arrays/lists to first N items | None |
+| `--batch-size N` | Number of parallel requests | 10 |
+| `--max-retries N` | Retry attempts for 503/504 errors | 3 |
+| `--skip-maxim` | Skip Maxim evaluation (local validation only) | False |
+| `--maxim-only CSV` | Run Maxim eval on existing CSV results | None |
 
-See `evals/README.md` for detailed documentation and advanced usage.
+#### CSV Format
+
+**Input columns:**
+- `Input` (required): The query/command to send to your agent
+- `Expected_output` (required): Expected response (can be JSON, text, or schema)
+
+**Output columns (auto-generated):**
+- `input`, `expected_output`, `actual_output`: Test case and results
+- `schema_valid`, `schema_errors`: Schema structure validation
+- `tracing_valid`, `tracing_errors`: Debug tracing workflow validation
+- `bias`: Maxim bias detection score (0-1, lower is better)
+- `tracing_similarity`: Maxim semantic similarity for tracing (yes/no)
+- `content_similarity`: Maxim semantic similarity for content (yes/no)
+
+#### Examples
+
+```bash
+# Standard evaluation with Maxim
+python -m evals.bulk_evals --csv-file evals/my_tests.csv
+
+# Filter out formatting fields for cleaner comparison
+python -m evals.bulk_evals --exclude-fields header_message,footer_message,id,timestamp
+
+# Fast local validation without Maxim (no API costs)
+python -m evals.bulk_evals --skip-maxim --timeout 30.0
+
+# Limit arrays to 5 items and increase parallelism
+python -m evals.bulk_evals --max-items 5 --batch-size 20
+
+# Re-run Maxim evaluation on existing results
+python -m evals.bulk_evals --maxim-only evals/evaluation_results_20260126_143022.csv
+```
+
+#### Schema Validation
+
+The system automatically validates that actual responses match the expected schema structure:
+
+```csv
+Input,Expected_output
+"Get user data","{\"id\": \"str\", \"name\": \"str\", \"active\": \"bool\"}"
+```
+
+If actual output is `{"id": "user123", "name": "John", "active": true}`, schema validation passes. If it returns `{"id": 123, "username": "John"}`, you'll see errors like:
+- `.name: Missing required key`
+- `.username: Unexpected key (not in expected schema)`
+
+#### Performance Tips
+
+- Use `--exclude-fields` to remove noise from responses (header/footer messages, IDs, timestamps)
+- Set `--timeout` to prevent hanging on slow responses
+- Use `--max-items` to limit large arrays for faster comparison
+- Increase `--batch-size` if you have good network and want faster processing
+- Use `--skip-maxim` for rapid iteration during development
+- Token reuse: Authentication happens once per run, not per request
+
+See **`evals/README.md`** for detailed documentation, advanced features, and troubleshooting.
 
 ### Configuration Files
 

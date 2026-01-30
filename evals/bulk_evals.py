@@ -4,6 +4,13 @@
 import os
 import sys
 import logging
+
+# Fix Windows console encoding for Unicode characters
+if sys.platform == 'win32':
+    import io
+    # line_buffering=True ensures output is flushed after each newline (real-time logging)
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 import pandas as pd
 import json
 import ast
@@ -11,9 +18,11 @@ import requests
 import argparse
 import time
 import uuid
-from typing import List, Any, Dict, Union, Tuple
+from typing import List, Any, Dict, Union, Tuple, Optional
+import csv
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 
 # Auto-add project root to Python path so imports work from any directory
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -266,6 +275,49 @@ def normalize_step_for_comparison(step: Dict[str, Any]) -> str:
     
     return "|".join(parts)
 
+def extract_message_content(response: Union[Dict, str, Any]) -> str:
+    """
+    Extract the full message content from a response for content similarity comparison.
+    
+    Args:
+        response: The response dictionary, string, or parsed dict
+    
+    Returns:
+        String representation of the message content
+    """
+    try:
+        # Parse if string
+        parsed_response = response
+        if isinstance(response, str):
+            try:
+                parsed_response = json.loads(response)
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    parsed_response = ast.literal_eval(response)
+                except (ValueError, SyntaxError):
+                    return response  # Return as-is if can't parse
+        
+        if not isinstance(parsed_response, dict):
+            return str(parsed_response)
+        
+        # Extract ai_message content
+        if "ai_message" in parsed_response:
+            ai_message = parsed_response.get("ai_message", {})
+            if "content" in ai_message:
+                content = ai_message["content"]
+                if isinstance(content, list):
+                    # Join list items into a string
+                    return "\n".join(str(item) for item in content)
+                else:
+                    return str(content)
+        
+        # If no ai_message, try to return the whole response as string
+        return json.dumps(parsed_response, ensure_ascii=False)
+        
+    except Exception:
+        # If extraction fails, return string representation
+        return str(response) if response else ""
+
 def normalize_debug_tracing(debug_tracing: Union[Dict, str, Any]) -> str:
     """
     Normalize debug_tracing for similarity comparison.
@@ -273,7 +325,7 @@ def normalize_debug_tracing(debug_tracing: Union[Dict, str, Any]) -> str:
     
     Args:
         debug_tracing: The debug_tracing dictionary, string, or parsed dict
-        
+    
     Returns:
         Normalized JSON string representation for similarity comparison
     """
@@ -377,79 +429,6 @@ def compare_tracing(expected_tracing: Dict[str, Any], actual_tracing: Dict[str, 
         
     except Exception as e:
         return "error", f"Error comparing tracing: {str(e)}"
-
-def extract_output_type_info(response: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract output_type and related styling information from response.
-    
-    Args:
-        response: The full response dictionary
-        
-    Returns:
-        Dictionary with output_type, data_structure, and format details
-    """
-    info = {
-        "output_type": None,
-        "data_structure": None,
-        "has_ordered_fields": False,
-        "data_item_count": 0
-    }
-    
-    try:
-        ai_message = response.get("ai_message", {})
-        content = ai_message.get("content", [])
-        
-        if isinstance(content, list) and len(content) > 0:
-            first_content = content[0]
-            if isinstance(first_content, dict):
-                info["output_type"] = first_content.get("output_type", None)
-                data = first_content.get("data", [])
-                
-                # Analyze data structure
-                if isinstance(data, list):
-                    info["data_item_count"] = len(data)
-                    if len(data) > 0:
-                        if isinstance(data[0], dict):
-                            info["data_structure"] = "list of dicts"
-                        else:
-                            info["data_structure"] = f"list of {type(data[0]).__name__}"
-                    else:
-                        info["data_structure"] = "empty list"
-                else:
-                    info["data_structure"] = type(data).__name__
-                
-                # Check for ordered display fields (indicates table structure)
-                ordered_fields = first_content.get("ordered_display_fields", [])
-                if ordered_fields and isinstance(ordered_fields, list) and len(ordered_fields) > 0:
-                    info["has_ordered_fields"] = True
-    except Exception:
-        pass
-    
-    return info
-
-def format_style_comparison_for_maxim(expected_info: Dict[str, Any], actual_info: Dict[str, Any]) -> str:
-    """
-    Format output_type/style comparison as natural language for Maxim semantic evaluation.
-    
-    Args:
-        expected_info: Output type info from expected response
-        actual_info: Output type info from actual response
-        
-    Returns:
-        Natural language comparison string for Maxim to evaluate
-    """
-    expected_type = expected_info.get("output_type", "unknown")
-    actual_type = actual_info.get("output_type", "unknown")
-    expected_structure = expected_info.get("data_structure", "unknown")
-    actual_structure = actual_info.get("data_structure", "unknown")
-    
-    comparison = f"""Output Format Validation:
-Expected format: {expected_type} with {expected_structure}
-Actual format: {actual_type} with {actual_structure}
-
-The output format must match exactly. If expected format is 'table', actual must also be 'table' with list of dicts structure. If expected is 'bullets_list', actual must be 'bullets_list'. Format mismatches (like table vs list, or unformatted text) are critical errors."""
-    
-    return comparison
 
 def validate_tracing(expected_output_str: str, actual_output: Any) -> Tuple[str, str]:
     """
@@ -569,12 +548,15 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     Load test data from a CSV file with columns: input, expected_output
     (case-insensitive - accepts Input/Expected_output or input/expected_output)
     Skips blank rows and rows with empty input or expected_output.
+    
+    If input_id column exists, rows with the same input_id will share the same
+    conversation_id, allowing them to be part of the same conversation context.
 
     Args:
         csv_file_path: Path to the CSV file
 
     Returns:
-        List of test data dictionaries
+        List of test data dictionaries with conversation_id for multi-turn conversations
     """
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
@@ -605,14 +587,41 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
     if skipped_count > 0:
         print(f"⚠️  Skipped {skipped_count} blank/invalid rows from CSV")
 
+    # Check if input_id column exists for conversation grouping
+    has_input_id = "input_id" in df.columns
+    
+    # Create a mapping from input_id to conversation_id (UUID)
+    input_id_to_conversation_id = {}
+    
+    if has_input_id:
+        # Get unique input_ids and generate a conversation_id for each
+        unique_input_ids = df["input_id"].unique()
+        for input_id in unique_input_ids:
+            input_id_to_conversation_id[input_id] = str(uuid.uuid4())
+        print(f"📝 Found {len(unique_input_ids)} unique conversations (input_id groups)")
+
     # Convert to list of dictionaries
     test_data = []
-    for _, row in df.iterrows():
-        test_data.append({
+    for row_index, (_, row) in enumerate(df.iterrows()):
+        data_item = {
             "input": str(row["input"]).strip(),
             "expected_output": str(row["expected_output"]).strip(),
             "context": "",  # Optional context column, default to empty
-        })
+            "original_row_index": row_index,  # Track original CSV order for sorting
+        }
+        
+        # Add conversation_id based on input_id (or generate new one if no input_id)
+        if has_input_id:
+            input_id = row["input_id"]
+            data_item["conversation_id"] = input_id_to_conversation_id[input_id]
+            data_item["input_id"] = input_id  # Keep original input_id for sorting
+        else:
+            # Each row gets its own conversation_id if no input_id column
+            data_item["conversation_id"] = str(uuid.uuid4())
+            data_item["input_id"] = None
+        
+        test_data.append(data_item)
+    
     return test_data
 
 
@@ -620,31 +629,41 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
 default_csv_file_path = "evals/test_data.csv"
 
 
-def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None, max_items: int = None):
+def call_local_agent(data, profile, access_token, exclude_fields: List[str] = None, timeout: float = None, max_items: int = None, no_cache: bool = False):
     """Function to call your local agent endpoint using Adopt API
     
     Args:
-        data: Input data dictionary
+        data: Input data dictionary (should contain conversation_id for multi-turn conversations)
         profile: Adopt profile configuration
         access_token: Authentication token
         exclude_fields: List of field names to exclude from the response
         timeout: Optional timeout in seconds. If the call takes longer, returns "timed out"
         max_items: Optional maximum number of items to keep in arrays/lists (e.g., 5 for first 5 items)
+        no_cache: If True, append a unique request ID to bypass LLM caching
     """
     try:
-        # Generate a unique trace ID for this prompt to create a new conversation context
-        trace_id = str(uuid.uuid4())
+        # Use conversation_id from data as trace_id to maintain conversation context
+        # Rows with the same input_id will share the same conversation_id/trace_id
+        trace_id = data.get("conversation_id") or str(uuid.uuid4())
         
         # Modify the input to include max_items instruction if specified
         modified_input = data["input"]
+        
+        # Bypass LLM caching by appending a unique request ID
+        # This is added as invisible metadata that doesn't change the semantic meaning
+        if no_cache:
+            request_id = str(uuid.uuid4())  # Unique ID
+            modified_input = f"{modified_input}\n\n[request_id: {request_id}]"
+        
         if max_items is not None and max_items > 0:
             # Append instruction to limit results in the prompt
-            modified_input = f"{data['input']}\n\nPlease limit your response to only the first {max_items} items if returning a list, table, or array of results."
+            modified_input = f"{modified_input}\n\nPlease limit your response to only the first {max_items} items if returning a list, table, or array of results."
         
         # Get full response for schema validation (includes status, message, ai_message, debug_tracing)
+        expected_output = data.get("expected_output")
         if timeout is not None and timeout > 0:
             with ThreadPoolExecutor(max_workers=3) as executor:
-                future = executor.submit(run_simple_action_full_response, modified_input, profile, access_token, trace_id)
+                future = executor.submit(run_simple_action_full_response, modified_input, profile, access_token, trace_id, expected_output)
                 try:
                     full_response = future.result(timeout=timeout)
                 except FutureTimeoutError:
@@ -655,7 +674,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
                     )
         else:
             # No timeout specified, call directly
-            full_response = run_simple_action_full_response(modified_input, profile, access_token, trace_id)
+            full_response = run_simple_action_full_response(modified_input, profile, access_token, trace_id, expected_output)
         
         # Extract the formatted response string for display/Maxim evaluation
         # This maintains backward compatibility with existing evaluation flow
@@ -753,6 +772,84 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         )
 
 
+def process_conversation_sequentially(
+    conversation_turns: List[Dict],
+    call_agent_func,
+    max_retries: int,
+    retry_counts: Dict[str, int],
+    error_log: List[Dict]
+) -> List[Tuple[Dict, YieldedOutput]]:
+    """
+    Process a single conversation's turns sequentially (in order).
+    
+    Multi-turn conversations must be processed in order because each turn
+    depends on the previous turn's context.
+    
+    Args:
+        conversation_turns: List of test data dictionaries for one conversation (in order)
+        call_agent_func: Function to call for each prompt
+        max_retries: Maximum number of retry attempts
+        retry_counts: Dictionary tracking retry counts by input string
+        error_log: List to append error information to
+    
+    Returns:
+        List of (data, YieldedOutput) tuples for the conversation
+    """
+    results = []
+    
+    for turn_index, data in enumerate(conversation_turns):
+        input_key = data["input"]
+        
+        # Retry loop for this turn
+        success = False
+        while not success:
+            try:
+                result = call_agent_func(data)
+                # Check if the result itself contains an error
+                if result.data and str(result.data).startswith("Error:"):
+                    error_log.append({
+                        "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                        "error": str(result.data)
+                    })
+                results.append((data, result))
+                success = True
+            except RetryableHTTPError as e:
+                # Track retry count by input string
+                current_retries = retry_counts.get(input_key, 0)
+                if current_retries < max_retries:
+                    retry_counts[input_key] = current_retries + 1
+                    print(f"    ⚠️  Turn {turn_index + 1}: HTTP {e.status_code} - retrying (attempt {retry_counts[input_key]}/{max_retries})")
+                    time.sleep(RETRY_DELAY_SECONDS)
+                else:
+                    # Max retries exceeded, add error result
+                    error_msg = f"Error after {max_retries} retries: HTTP {e.status_code}"
+                    print(f"    ❌ Turn {turn_index + 1}: HTTP {e.status_code} - max retries exceeded")
+                    error_log.append({
+                        "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                        "error": error_msg
+                    })
+                    results.append((data, YieldedOutput(
+                        data=error_msg,
+                        retrieved_context_to_evaluate=data.get("context", ""),
+                    )))
+                    success = True  # Move on to next turn
+            except Exception as e:
+                # Non-retryable error
+                error_msg = f"Error: {str(e)}"
+                print(f"    ❌ Turn {turn_index + 1}: {error_msg}")
+                error_log.append({
+                    "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                    "error": error_msg
+                })
+                results.append((data, YieldedOutput(
+                    data=error_msg,
+                    retrieved_context_to_evaluate=data.get("context", ""),
+                )))
+                success = True  # Move on to next turn
+    
+    return results
+
+
 def process_single_batch(
     batch_data: List[Dict],
     call_agent_func,
@@ -764,54 +861,126 @@ def process_single_batch(
     """
     Process a single batch of prompts with parallel execution.
     
+    For multi-turn conversations (items with the same conversation_id), 
+    turns are processed sequentially to maintain context. Different 
+    conversations are processed in parallel.
+    
     Args:
         batch_data: List of test data dictionaries for this batch
         call_agent_func: Function to call for each prompt
-        max_parallel: Maximum number of prompts to process in parallel
+        max_parallel: Maximum number of conversations to process in parallel
         max_retries: Maximum number of retry attempts
         retry_counts: Dictionary tracking retry counts by input string
         error_log: List to append error information to
     
     Returns:
         Tuple of (successful_results, failed_prompts_to_retry)
+        Note: For multi-turn mode, failed_prompts is always empty since retries
+        are handled within process_conversation_sequentially
     """
     batch_results = []
     failed_prompts = []
     
-    # Process batch in parallel using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
-        # Submit all tasks
-        future_to_data = {
-            executor.submit(call_agent_func, data): data 
-            for data in batch_data
-        }
+    # Group data by conversation_id to identify multi-turn conversations
+    conversations: Dict[str, List[Dict]] = {}
+    for data in batch_data:
+        conv_id = data.get("conversation_id", str(uuid.uuid4()))
+        if conv_id not in conversations:
+            conversations[conv_id] = []
+        conversations[conv_id].append(data)
+    
+    # Check if we have multi-turn conversations (any conversation with > 1 turn)
+    has_multi_turn = any(len(turns) > 1 for turns in conversations.values())
+    
+    if has_multi_turn:
+        # Multi-turn mode: Process conversations in parallel, but turns within 
+        # each conversation sequentially
+        print(f"  📝 Multi-turn mode: {len(conversations)} conversations")
         
-        # Collect results as they complete
-        for future in as_completed(future_to_data):
-            data = future_to_data[future]
-            input_key = data["input"]
-            try:
-                result = future.result()
-                # Check if the result itself contains an error
-                if result.data and str(result.data).startswith("Error:"):
-                    error_log.append({
-                        "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
-                        "error": str(result.data)
-                    })
-                batch_results.append((data, result))
-            except RetryableHTTPError as e:
-                # Track retry count by input string
-                current_retries = retry_counts.get(input_key, 0)
-                truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
-                if current_retries < max_retries:
-                    retry_counts[input_key] = current_retries + 1
-                    print(f"  ⚠️  HTTP {e.status_code} - will retry (attempt {retry_counts[input_key]}/{max_retries})")
-                    print(f"      Prompt: {truncated_input}")
-                    failed_prompts.append(data)
-                else:
-                    # Max retries exceeded, add error result
-                    error_msg = f"Error after {max_retries} retries: HTTP {e.status_code}"
-                    print(f"  ❌ HTTP {e.status_code} - max retries exceeded")
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            # Submit each conversation as a unit
+            future_to_conv_id = {
+                executor.submit(
+                    process_conversation_sequentially,
+                    turns,
+                    call_agent_func,
+                    max_retries,
+                    retry_counts,
+                    error_log
+                ): conv_id
+                for conv_id, turns in conversations.items()
+            }
+            
+            # Collect results (order doesn't matter here since each conversation
+            # is processed in order internally)
+            for future in as_completed(future_to_conv_id):
+                conv_id = future_to_conv_id[future]
+                try:
+                    conversation_results = future.result()
+                    batch_results.extend(conversation_results)
+                except Exception as e:
+                    # Unexpected error at conversation level
+                    error_msg = f"Error processing conversation: {str(e)}"
+                    print(f"  ❌ Conversation {conv_id[:8]}...: {error_msg}")
+                    # Add error results for all turns in this conversation
+                    for data in conversations[conv_id]:
+                        error_log.append({
+                            "input": data["input"][:100] + "..." if len(data["input"]) > 100 else data["input"],
+                            "error": error_msg
+                        })
+                        batch_results.append((data, YieldedOutput(
+                            data=error_msg,
+                            retrieved_context_to_evaluate=data.get("context", ""),
+                        )))
+    else:
+        # Single-turn mode: Process all prompts in parallel (original behavior)
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            # Submit all tasks
+            future_to_data = {
+                executor.submit(call_agent_func, data): data 
+                for data in batch_data
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_data):
+                data = future_to_data[future]
+                input_key = data["input"]
+                try:
+                    result = future.result()
+                    # Check if the result itself contains an error
+                    if result.data and str(result.data).startswith("Error:"):
+                        error_log.append({
+                            "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                            "error": str(result.data)
+                        })
+                    batch_results.append((data, result))
+                except RetryableHTTPError as e:
+                    # Track retry count by input string
+                    current_retries = retry_counts.get(input_key, 0)
+                    truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
+                    if current_retries < max_retries:
+                        retry_counts[input_key] = current_retries + 1
+                        print(f"  ⚠️  HTTP {e.status_code} - will retry (attempt {retry_counts[input_key]}/{max_retries})")
+                        print(f"      Prompt: {truncated_input}")
+                        failed_prompts.append(data)
+                    else:
+                        # Max retries exceeded, add error result
+                        error_msg = f"Error after {max_retries} retries: HTTP {e.status_code}"
+                        print(f"  ❌ HTTP {e.status_code} - max retries exceeded")
+                        print(f"      Prompt: {truncated_input}")
+                        error_log.append({
+                            "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                            "error": error_msg
+                        })
+                        batch_results.append((data, YieldedOutput(
+                            data=error_msg,
+                            retrieved_context_to_evaluate=data.get("context", ""),
+                        )))
+                except Exception as e:
+                    # Non-retryable error
+                    error_msg = f"Error: {str(e)}"
+                    truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
+                    print(f"  ❌ {error_msg}")
                     print(f"      Prompt: {truncated_input}")
                     error_log.append({
                         "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
@@ -821,20 +990,6 @@ def process_single_batch(
                         data=error_msg,
                         retrieved_context_to_evaluate=data.get("context", ""),
                     )))
-            except Exception as e:
-                # Non-retryable error
-                error_msg = f"Error: {str(e)}"
-                truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
-                print(f"  ❌ {error_msg}")
-                print(f"      Prompt: {truncated_input}")
-                error_log.append({
-                    "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
-                    "error": error_msg
-                })
-                batch_results.append((data, YieldedOutput(
-                    data=error_msg,
-                    retrieved_context_to_evaluate=data.get("context", ""),
-                )))
     
     return batch_results, failed_prompts
 
@@ -866,6 +1021,7 @@ def send_all_results_to_maxim(
     # Filter test_data to only include items that have results
     # This ensures we only send data to Maxim that we have precomputed results for
     # Also extract debug_tracing from expected_output for similarity comparison
+    # IMPORTANT: Remove conversation_id and input_id - these should NOT be sent to Maxim
     test_data_with_results = []
     for data in test_data:
         if data["input"] in precomputed_results:
@@ -888,16 +1044,31 @@ def send_all_results_to_maxim(
                 if expected_debug_tracing:
                     # Normalize and replace expected_output with just debug_tracing
                     normalized_expected_tracing = normalize_debug_tracing(expected_debug_tracing)
-                    data_copy = data.copy()
-                    data_copy["expected_output"] = normalized_expected_tracing
+                    # Create clean data copy without conversation_id and input_id
+                    data_copy = {
+                        "input": data["input"],
+                        "expected_output": normalized_expected_tracing,
+                        "context": data.get("context", ""),
+                    }
                     test_data_with_results.append(data_copy)
                 else:
                     # If no debug_tracing in expected, skip this item for similarity comparison
                     # but still include it for other evaluations
-                    test_data_with_results.append(data)
+                    # Create clean data copy without conversation_id and input_id
+                    data_copy = {
+                        "input": data["input"],
+                        "expected_output": data.get("expected_output", ""),
+                        "context": data.get("context", ""),
+                    }
+                    test_data_with_results.append(data_copy)
             except Exception:
-                # If extraction fails, use original data
-                test_data_with_results.append(data)
+                # If extraction fails, use original data (without conversation_id and input_id)
+                data_copy = {
+                    "input": data["input"],
+                    "expected_output": data.get("expected_output", ""),
+                    "context": data.get("context", ""),
+                }
+                test_data_with_results.append(data_copy)
     
     print(f"  Filtered test_data: {len(test_data)} -> {len(test_data_with_results)} items with results")
     
@@ -981,9 +1152,128 @@ def send_all_results_to_maxim(
                     }
                 )
                 .with_data(test_data_with_results)
-                .with_evaluators("Bias", "Ragas Answer Semantic Similarity", "Ragas Context Precision")
+                .with_evaluators("Bias", "General LLM Judge")
                 .yields_output(get_precomputed_result)
-                .run()
+                .run(timeout_in_minutes=20)
+            )
+        
+        if result is not None and result.test_run_result is not None:
+            test_run_id = result.test_run_result.link.split('/')[-1]
+            return test_run_id
+        else:
+            print("⚠️  Maxim returned None - this can happen if:")
+            print("   1. The test run timed out (20 min timeout)")
+            print("   2. Check the Maxim web portal - the test run may still be completing")
+            print("   3. You can manually fetch results later using the test run ID from the URL above")
+            return None
+    except Exception as e:
+        error_msg = str(e)
+        print(f"⚠️  Failed to send results to Maxim: {e}")
+        
+        # Check if this is a timeout error with a test run URL
+        if "timeout period" in error_msg and "testrun/" in error_msg:
+            # Try to extract test run ID from the error message
+            try:
+                import re
+                match = re.search(r'testrun/([a-zA-Z0-9]+)', error_msg)
+                if match:
+                    test_run_id = match.group(1)
+                    print(f"\n💡 TIP: Test run is still processing on Maxim servers!")
+                    print(f"   Test Run ID: {test_run_id}")
+                    print(f"   You can fetch results later with:")
+                    print(f"   poetry run python evals/bulk_evals.py --fetch-maxim-results {test_run_id}")
+                    return test_run_id  # Return the ID so we can try to fetch later
+            except Exception:
+                pass
+        
+        return None
+
+
+def send_content_similarity_to_maxim(
+    test_data: List[Dict],
+    all_results: List[Tuple[Dict, YieldedOutput]]
+) -> str:
+    """
+    Send all collected results to Maxim for content similarity evaluation.
+    This compares the full message content from expected and actual outputs.
+    
+    Args:
+        test_data: Original test data list
+        all_results: List of (data, YieldedOutput) tuples with all results
+    
+    Returns:
+        Test run ID if successful, None otherwise
+    """
+    # Safety check: if Maxim client is not initialized, return None
+    if maxim_client is None:
+        print("⚠️  Maxim client not initialized - skipping content similarity evaluation")
+        return None
+    
+    # Create lookup for precomputed results
+    precomputed_results = {}
+    for data, output in all_results:
+        precomputed_results[data["input"]] = output
+    
+    # Prepare test data with message content extracted from expected_output
+    # IMPORTANT: Only include input, expected_output, context - do NOT send conversation_id or input_id to Maxim
+    test_data_with_content = []
+    for data in test_data:
+        if data["input"] in precomputed_results:
+            # Extract message content from expected_output
+            expected_output_str = data.get("expected_output", "")
+            expected_message_content = extract_message_content(expected_output_str)
+            
+            # Create clean data copy without conversation_id and input_id
+            data_copy = {
+                "input": data["input"],
+                "expected_output": expected_message_content,
+                "context": data.get("context", ""),
+            }
+            test_data_with_content.append(data_copy)
+    
+    print(f"  Prepared {len(test_data_with_content)} items for content similarity evaluation")
+    
+    def get_content_result(data):
+        input_key = data["input"]
+        if input_key in precomputed_results:
+            output = precomputed_results[input_key]
+            # Extract message content from actual output
+            if isinstance(output.data, tuple) and len(output.data) == 2:
+                _, full_response = output.data
+                actual_message_content = extract_message_content(full_response)
+            else:
+                # If not a tuple, try to extract from string
+                actual_message_content = extract_message_content(output.data)
+            
+            return YieldedOutput(
+                data=actual_message_content,
+                retrieved_context_to_evaluate=output.retrieved_context_to_evaluate,
+            )
+        else:
+            return YieldedOutput(
+                data="Error: Result not found in precomputed cache",
+                retrieved_context_to_evaluate=data.get("context", ""),
+            )
+    
+    try:
+        # Suppress verbose "Overriding context_to_evaluate" messages from Maxim SDK
+        with suppress_maxim_logs():
+            result = (
+                maxim_client.create_test_run(
+                    name="Content Similarity Test", 
+                    in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
+                )
+                .with_data_structure(
+                    {
+                        "input": "INPUT",
+                        "expected_output": "EXPECTED_OUTPUT",
+                        "context": "CONTEXT_TO_EVALUATE",
+                    }
+                )
+                .with_data(test_data_with_content)
+                .with_evaluators("Bias", "General LLM Judge")
+                .yields_output(get_content_result)
+                .run(timeout_in_minutes=20)
             )
         
         if result is not None and result.test_run_result is not None:
@@ -993,44 +1283,8 @@ def send_all_results_to_maxim(
             print("⚠️  Maxim returned None - likely a server error")
             return None
     except Exception as e:
-        error_str = str(e)
-        # If the error is about Ragas Context Precision not being available, try without it
-        if "Ragas Context Precision" in error_str or "Failed to fetch evaluator" in error_str:
-            print(f"⚠️  {error_str}")
-            print("  Retrying without 'Ragas Context Precision' evaluator...")
-            try:
-                with suppress_maxim_logs():
-                    result = (
-                        maxim_client.create_test_run(
-                            name="Local Agent Endpoint Test", 
-                            in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
-                        )
-                        .with_data_structure(
-                            {
-                                "input": "INPUT",
-                                "expected_output": "EXPECTED_OUTPUT",
-                                "context": "CONTEXT_TO_EVALUATE",
-                            }
-                        )
-                        .with_data(test_data_with_results)
-                        .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
-                        .yields_output(get_precomputed_result)
-                        .run()
-                    )
-                
-                if result is not None and result.test_run_result is not None:
-                    test_run_id = result.test_run_result.link.split('/')[-1]
-                    print("  ✓ Successfully created test run without 'Ragas Context Precision'")
-                    return test_run_id
-                else:
-                    print("⚠️  Maxim returned None on retry - likely a server error")
-                    return None
-            except Exception as retry_e:
-                print(f"⚠️  Failed to send results to Maxim on retry: {retry_e}")
-                return None
-        else:
-            print(f"⚠️  Failed to send results to Maxim: {e}")
-            return None
+        print(f"⚠️  Failed to send content similarity to Maxim: {e}")
+        return None
 
 
 def initialize_raw_csv(csv_filename: str) -> None:
@@ -1042,11 +1296,51 @@ def initialize_raw_csv(csv_filename: str) -> None:
     import csv
     
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'style_valid', 'style_errors', 'bias', 'similarity']
+        fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
     
     print(f"📄 Initialized raw results CSV: {csv_filename}")
+
+
+def sort_csv_by_conversation_id(csv_filename: str) -> None:
+    """Sort a CSV file by original_row_index to preserve the exact order from the input CSV.
+    
+    This ensures the output CSV matches the input CSV order exactly, which is important
+    for multi-turn conversations where turns must appear in the same order as submitted.
+    
+    Args:
+        csv_filename: Path to the CSV file to sort
+    """
+    import csv
+    
+    if not os.path.exists(csv_filename):
+        print(f"⚠️  Cannot sort: file not found: {csv_filename}")
+        return
+    
+    # Read all rows
+    rows = []
+    fieldnames = None
+    with open(csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    
+    if not rows:
+        print(f"⚠️  Cannot sort: no data in file: {csv_filename}")
+        return
+    
+    # Sort by original_row_index to preserve exact input CSV order
+    # This ensures multi-turn conversations appear in the same order as submitted
+    rows.sort(key=lambda r: int(r.get('original_row_index', 0)))
+    
+    # Write back sorted rows
+    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    
+    print(f"📋 Sorted {len(rows)} rows by original order")
 
 
 def append_batch_to_csv(
@@ -1062,7 +1356,7 @@ def append_batch_to_csv(
     import csv
     
     with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'style_valid', 'style_errors', 'bias', 'similarity']
+        fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
         for data, output in batch_results:
@@ -1096,13 +1390,39 @@ def append_batch_to_csv(
             schema_errors_csv = schema_errors.replace('\n', '\\n') if schema_errors else ""
             tracing_errors_csv = tracing_errors.replace('\n', '\\n') if tracing_errors else ""
             
-            # Calculate similarity from debug_tracing comparison
+            # Check if expected output has debug_tracing before calculating similarity
+            # Parse expected_output to check for debug_tracing
+            has_expected_tracing = False
+            try:
+                if isinstance(data['expected_output'], str):
+                    try:
+                        expected_dict = json.loads(data['expected_output'])
+                    except (json.JSONDecodeError, ValueError):
+                        try:
+                            expected_dict = ast.literal_eval(data['expected_output'])
+                        except (ValueError, SyntaxError):
+                            expected_dict = {}
+                else:
+                    expected_dict = data['expected_output']
+                
+                expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+                has_expected_tracing = expected_tracing is not None
+            except Exception:
+                has_expected_tracing = False
+            
+            # Calculate similarity from debug_tracing comparison only if expected has debug_tracing
             # Similarity compares debug_tracings, which is what tracing_valid does
             # So use tracing_valid as initial similarity indicator
             # Maxim evaluation will override this with semantic similarity if available
-            initial_similarity = tracing_valid if tracing_valid in ("yes", "no") else "no"
+            if has_expected_tracing:
+                initial_similarity = tracing_valid if tracing_valid in ("yes", "no") else "no"
+            else:
+                # Skip tracing_similarity if expected output has no debug_tracing
+                initial_similarity = ""
             
             writer.writerow({
+                'original_row_index': data.get('original_row_index', 0),
+                'conversation_id': data.get('conversation_id', ''),
                 'input': data['input'],
                 'expected_output': data['expected_output'],
                 'actual_output': actual_output,
@@ -1110,10 +1430,9 @@ def append_batch_to_csv(
                 'schema_errors': schema_errors_csv,
                 'tracing_valid': tracing_valid,
                 'tracing_errors': tracing_errors_csv,
-                'style_valid': '',  # Will be filled by Maxim later
-                'style_errors': '',  # Will be filled by Maxim later
                 'bias': '',  # Will be filled by Maxim later
-                'similarity': initial_similarity  # Initial similarity based on tracing validation, Maxim will override if available
+                'tracing_similarity': initial_similarity,  # Initial similarity based on tracing validation, Maxim will override if available
+                'content_similarity': ''  # Will be filled by Maxim later
             })
 
 
@@ -1138,7 +1457,7 @@ def send_batch_to_maxim_background(
     for data, output in batch_results:
         precomputed_results[data["input"]] = output
     
-    # Create lookup for original expected_output (needed for style validation)
+    # Create lookup for original expected_output
     original_expected_output_lookup = {}
     for data in batch_data:
         original_expected_output_lookup[data["input"]] = data.get("expected_output", "")
@@ -1191,39 +1510,8 @@ def send_batch_to_maxim_background(
                     if actual_debug_tracing:
                         normalized_actual_tracing = normalize_debug_tracing(actual_debug_tracing)
                 
-                # Extract output_type info for style validation (keep for context evaluation)
-                try:
-                    # Parse expected_output to extract style info
-                    # Note: data["expected_output"] now contains normalized debug_tracing
-                    # Need to get original expected_output from the lookup
-                    original_expected_output_str = original_expected_output_lookup.get(input_key)
-                    
-                    if original_expected_output_str:
-                        if isinstance(original_expected_output_str, str):
-                            try:
-                                expected_dict = json.loads(original_expected_output_str)
-                            except (json.JSONDecodeError, ValueError):
-                                try:
-                                    expected_dict = ast.literal_eval(original_expected_output_str)
-                                except (ValueError, SyntaxError):
-                                    expected_dict = {}
-                        else:
-                            expected_dict = original_expected_output_str
-                        
-                        expected_info = extract_output_type_info(expected_dict)
-                        actual_info = extract_output_type_info(full_response if isinstance(full_response, dict) else {})
-                        
-                        # Format style comparison for Maxim semantic evaluation
-                        style_comparison = format_style_comparison_for_maxim(expected_info, actual_info)
-                        
-                        # Add to context for Maxim to evaluate
-                        existing_context = output.retrieved_context_to_evaluate or ""
-                        combined_context = f"{existing_context}\n\n{style_comparison}" if existing_context else style_comparison
-                    else:
-                        combined_context = output.retrieved_context_to_evaluate
-                except Exception:
-                    # If style extraction fails, use existing context
-                    combined_context = output.retrieved_context_to_evaluate
+                # Use existing context
+                combined_context = output.retrieved_context_to_evaluate
                 
                 # Return normalized debug_tracing for similarity comparison
                 if normalized_actual_tracing:
@@ -1284,9 +1572,9 @@ def send_batch_to_maxim_background(
                     }
                 )
                 .with_data(batch_data_with_tracing)
-                .with_evaluators("Bias", "Ragas Answer Semantic Similarity", "Ragas Context Precision")
+                .with_evaluators("Bias", "General LLM Judge")
                 .yields_output(get_precomputed_result)
-                .run()
+                .run(timeout_in_minutes=20)
             )
         
         if result is not None and result.test_run_result is not None:
@@ -1295,51 +1583,17 @@ def send_batch_to_maxim_background(
         else:
             return None
     except Exception as e:
-        error_str = str(e)
-        # If the error is about Ragas Context Precision not being available, try without it
-        if "Ragas Context Precision" in error_str or "Failed to fetch evaluator" in error_str:
-            print(f"  ⚠️  Maxim error for batch {batch_number}: {error_str}")
-            print(f"  Retrying batch {batch_number} without 'Ragas Context Precision' evaluator...")
-            try:
-                with suppress_maxim_logs():
-                    result = (
-                        maxim_client.create_test_run(
-                            name=f"Local Agent Endpoint Test - Batch {batch_number}", 
-                            in_workspace_id=adopt_env.MAXIM_WORKSPACE_ID
-                        )
-                        .with_data_structure(
-                            {
-                                "input": "INPUT",
-                                "expected_output": "EXPECTED_OUTPUT",
-                                "context": "CONTEXT_TO_EVALUATE",
-                            }
-                        )
-                        .with_data(batch_data_with_tracing)
-                        .with_evaluators("Bias", "Ragas Answer Semantic Similarity")
-                        .yields_output(get_precomputed_result)
-                        .run()
-                    )
-                
-                if result is not None and result.test_run_result is not None:
-                    test_run_id = result.test_run_result.link.split('/')[-1]
-                    print(f"  ✓ Successfully created test run for batch {batch_number} without 'Ragas Context Precision'")
-                    return test_run_id
-                else:
-                    return None
-            except Exception as retry_e:
-                print(f"  ⚠️  Maxim error for batch {batch_number} on retry: {retry_e}")
-                return None
-        else:
-            print(f"  ⚠️  Maxim error for batch {batch_number}: {e}")
-            return None
+        print(f"  ⚠️  Maxim error for batch {batch_number}: {e}")
+        return None
 
 
-def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str]) -> str:
+def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str], content_similarity_test_run_ids: List[str] = None) -> str:
     """Update the raw CSV file with Maxim evaluation scores.
     
     Args:
         raw_csv_filename: Path to the raw CSV file (with empty bias/similarity)
-        test_run_ids: List of Maxim test run IDs to fetch scores from
+        test_run_ids: List of Maxim test run IDs to fetch scores from (for tracing similarity, bias)
+        content_similarity_test_run_ids: Optional list of Maxim test run IDs for content similarity
     
     Returns:
         Path to the final CSV file with scores
@@ -1347,26 +1601,57 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     import csv
     from datetime import datetime
     
+    print("\n📊 Updating CSV with Maxim scores...")
+    
     if not test_run_ids:
         print("⚠️  No Maxim test runs to fetch scores from")
         print(f"Raw results are still available in: {raw_csv_filename}")
         return raw_csv_filename
+    
+    print(f"   CSV file: {raw_csv_filename}")
+    print(f"   Test run IDs: {len(test_run_ids)}")
+    print()
+    
+    # STEP 1: Read CSV to get the row count and list of inputs that need scores
+    print("📖 Reading CSV to identify inputs that need scores...")
+    needed_inputs = set()
+    csv_row_count = 0
+    try:
+        with open(raw_csv_filename, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                csv_row_count += 1
+                # Try both 'input' and 'Input' (case-insensitive)
+                input_text = row.get('input', row.get('Input', '')).strip()
+                if input_text:
+                    needed_inputs.add(input_text)
+        print(f"   ✓ Found {csv_row_count} rows ({len(needed_inputs)} unique inputs) in CSV")
+    except Exception as e:
+        print(f"   ⚠️  Error reading CSV: {e}")
+        print("   Falling back to fetching all entries...")
+        needed_inputs = None  # Fetch all if we can't read CSV
+        csv_row_count = None
+    print()
     
     # Fetch all Maxim scores and create a lookup by input
     scores_lookup = {}
     total_entries_fetched = 0
     duplicate_count = 0
     
+    print("🔍 Fetching scores from Maxim API...")
+    
     for test_run_id in test_run_ids:
         if test_run_id is None:
             continue
         
-        print(f"  Fetching scores from test run: {test_run_id}")
+        print(f"  📥 Fetching scores from test run: {test_run_id}")
         
         entries_response = fetch_all_test_run_entries(
             test_run_id=test_run_id,
             workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
-            api_key=adopt_env.MAXIM_API_KEY
+            api_key=adopt_env.MAXIM_API_KEY,
+            needed_inputs=needed_inputs,
+            max_entries=csv_row_count
         )
         
         if not entries_response or 'data' not in entries_response:
@@ -1374,7 +1659,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             continue
         
         entries = entries_response['data']['entries']
-        print(f"    Found {len(entries)} entries")
+        print(f"    ✓ Found {len(entries)} entries")
         total_entries_fetched += len(entries)
         
         for entry in entries:
@@ -1383,31 +1668,24 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             
             # Extract scores
             stats = entry.get('stats', {})
-            overall_results = stats.get('overallEvaluatorMeanResult', [])
             pass_fail_results = stats.get('overallPassFailResult', [])
             
-            bias_score = 0
-            for result in overall_results:
-                if result['name'] == 'Bias':
-                    bias_score = result['value']
-                    break
-            
-            similarity = "no"
+            # Extract bias pass/fail
+            # bias="yes" means passed bias check (no bias detected), "no" means failed (bias detected)
+            bias = "no"
             for result in pass_fail_results:
-                if result['name'] == 'Ragas Answer Semantic Similarity':
-                    similarity = "yes" if result['value']['pass'] else "no"
+                if result['name'] == 'Bias':
+                    bias = "yes" if result.get('value', {}).get('pass', False) else "no"
                     break
             
-            # Extract style validation from Ragas Context Precision
-            # This evaluates if the context (which includes style comparison) matches
-            style_valid = "no"
-            context_precision_score = 0
-            for result in overall_results:
-                if result['name'] == 'Ragas Context Precision':
-                    context_precision_score = result['value']
-                    # If context precision is high, style likely matches
-                    # Threshold: >= 0.7 means styles match
-                    style_valid = "yes" if context_precision_score >= 0.7 else "no"
+            # Extract tracing similarity pass/fail (prefer General LLM Judge over Ragas)
+            similarity = "no"
+            for evaluator_name in ['General LLM Judge', 'Ragas Answer Semantic Similarity']:
+                for result in pass_fail_results:
+                    if result['name'] == evaluator_name:
+                        similarity = "yes" if result.get('value', {}).get('pass', False) else "no"
+                        break
+                if similarity != "no":
                     break
             
             # Handle duplicates: keep track of all occurrences but use the latest scores
@@ -1416,15 +1694,72 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                 # Keep the latest scores (most recent evaluation)
                 # Could also average or keep first, but latest is usually most accurate
             
-            scores_lookup[input_text] = {
-                'bias': bias_score,
-                'similarity': similarity,
-                'style_valid': style_valid,
-                'style_score': context_precision_score
-            }
+            # Initialize if not exists
+            if input_text not in scores_lookup:
+                scores_lookup[input_text] = {
+                    'bias': "no",
+                    'tracing_similarity': "no",
+                    'content_similarity': "no"
+                }
+            
+            # Update scores (merge with existing if duplicate)
+            scores_lookup[input_text].update({
+                'bias': bias,
+                'tracing_similarity': similarity
+            })
     
-    print(f"\n  Total entries fetched from Maxim: {total_entries_fetched}")
-    print(f"  Unique inputs in scores lookup: {len(scores_lookup)}")
+    # Fetch content similarity scores if provided
+    if content_similarity_test_run_ids:
+        print(f"\n  Fetching content similarity scores from {len(content_similarity_test_run_ids)} test run(s)...")
+        for test_run_id in content_similarity_test_run_ids:
+            if test_run_id is None:
+                continue
+            
+            print(f"  Fetching content similarity from test run: {test_run_id}")
+            
+            entries_response = fetch_all_test_run_entries(
+                test_run_id=test_run_id,
+                workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
+                api_key=adopt_env.MAXIM_API_KEY,
+                needed_inputs=needed_inputs
+            )
+            
+            if not entries_response or 'data' not in entries_response:
+                print(f"    ⚠️  No data in response for {test_run_id}")
+                continue
+            
+            entries = entries_response['data']['entries']
+            print(f"    Found {len(entries)} entries")
+            
+            for entry in entries:
+                input_text = entry['input']['payload'].strip()
+                
+                # Extract content similarity score
+                stats = entry.get('stats', {})
+                pass_fail_results = stats.get('overallPassFailResult', [])
+                
+                content_similarity = "no"
+                for evaluator_name in ['General LLM Judge', 'Ragas Answer Semantic Similarity']:
+                    for result in pass_fail_results:
+                        if result['name'] == evaluator_name:
+                            content_similarity = "yes" if result.get('value', {}).get('pass', False) else "no"
+                            break
+                    if content_similarity != "no":
+                        break
+                
+                # Initialize if not exists
+                if input_text not in scores_lookup:
+                    scores_lookup[input_text] = {
+                        'bias': "no",
+                        'tracing_similarity': "no",
+                        'content_similarity': "no"
+                    }
+                
+                # Update content similarity
+                scores_lookup[input_text]['content_similarity'] = content_similarity
+    
+    print(f"\n  📊 Total entries fetched from Maxim: {total_entries_fetched}")
+    print(f"  🔑 Unique inputs in scores lookup: {len(scores_lookup)}")
     if duplicate_count > 0:
         print(f"  ⚠️  Found {duplicate_count} duplicate inputs (kept latest scores)")
     
@@ -1480,6 +1815,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             return "error"
     
     # Read the raw CSV and update with scores
+    print(f"\n📝 Reading CSV file: {raw_csv_filename}")
     updated_rows = []
     matched_count = 0
     unmatched_inputs = []
@@ -1494,15 +1830,34 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
             # Try exact match first
             if input_text in scores_lookup:
                 row['bias'] = scores_lookup[input_text]['bias']
-                row['similarity'] = scores_lookup[input_text]['similarity']
-                # Add style validation if available
-                if 'style_valid' in scores_lookup[input_text]:
-                    row['style_valid'] = scores_lookup[input_text]['style_valid']
-                    # Store style score as error detail if validation failed
-                    if scores_lookup[input_text]['style_valid'] == 'no':
-                        row['style_errors'] = f"Style mismatch (Context Precision: {scores_lookup[input_text].get('style_score', 0):.2f})"
+                # Only set tracing_similarity if expected output has debug_tracing
+                expected_output_str = row.get('expected_output', '')
+                has_expected_tracing = False
+                try:
+                    if isinstance(expected_output_str, str):
+                        try:
+                            expected_dict = json.loads(expected_output_str)
+                        except (json.JSONDecodeError, ValueError):
+                            try:
+                                expected_dict = ast.literal_eval(expected_output_str)
+                            except (ValueError, SyntaxError):
+                                expected_dict = {}
                     else:
-                        row['style_errors'] = ""
+                        expected_dict = expected_output_str
+                    
+                    expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+                    has_expected_tracing = expected_tracing is not None
+                except Exception:
+                    has_expected_tracing = False
+                
+                if has_expected_tracing:
+                    row['tracing_similarity'] = scores_lookup[input_text]['tracing_similarity']
+                else:
+                    # Skip tracing_similarity if expected output has no debug_tracing
+                    row['tracing_similarity'] = ""
+                
+                # Always set content_similarity (it always runs)
+                row['content_similarity'] = scores_lookup[input_text].get('content_similarity', '')
                 matched_count += 1
             else:
                 # Try to find a fuzzy match (case-insensitive, normalized whitespace)
@@ -1513,14 +1868,34 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                     if normalized_input == normalized_maxim:
                         # Found a case/whitespace variant match
                         row['bias'] = scores_lookup[maxim_input]['bias']
-                        row['similarity'] = scores_lookup[maxim_input]['similarity']
-                        # Add style validation if available
-                        if 'style_valid' in scores_lookup[maxim_input]:
-                            row['style_valid'] = scores_lookup[maxim_input]['style_valid']
-                            if scores_lookup[maxim_input]['style_valid'] == 'no':
-                                row['style_errors'] = f"Style mismatch (Context Precision: {scores_lookup[maxim_input].get('style_score', 0):.2f})"
+                        # Only set tracing_similarity if expected output has debug_tracing
+                        expected_output_str = row.get('expected_output', '')
+                        has_expected_tracing = False
+                        try:
+                            if isinstance(expected_output_str, str):
+                                try:
+                                    expected_dict = json.loads(expected_output_str)
+                                except (json.JSONDecodeError, ValueError):
+                                    try:
+                                        expected_dict = ast.literal_eval(expected_output_str)
+                                    except (ValueError, SyntaxError):
+                                        expected_dict = {}
                             else:
-                                row['style_errors'] = ""
+                                expected_dict = expected_output_str
+                            
+                            expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+                            has_expected_tracing = expected_tracing is not None
+                        except Exception:
+                            has_expected_tracing = False
+                        
+                        if has_expected_tracing:
+                            row['tracing_similarity'] = scores_lookup[maxim_input]['tracing_similarity']
+                        else:
+                            # Skip tracing_similarity if expected output has no debug_tracing
+                            row['tracing_similarity'] = ""
+                        
+                        # Always set content_similarity (it always runs)
+                        row['content_similarity'] = scores_lookup[maxim_input].get('content_similarity', '')
                         matched_count += 1
                         matched = True
                         break
@@ -1530,34 +1905,63 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
                     if len(unmatched_inputs) < 10:  # Show more unmatched for debugging
                         unmatched_inputs.append(input_text)
             
-            # If similarity is still empty or only whitespace, calculate it from debug_tracing comparison
-            if not row.get('similarity') or not row.get('similarity').strip():
-                calculated_similarity = calculate_similarity_from_tracing(
-                    row.get('expected_output', ''),
-                    row.get('actual_output', '')
-                )
-                # Use calculated similarity if it's "yes", otherwise use tracing_valid as indicator
-                if calculated_similarity == "yes":
-                    row['similarity'] = "yes"
-                elif calculated_similarity == "error":
-                    # If calculation failed, use tracing_valid as fallback
-                    tracing_valid = row.get('tracing_valid', '').strip().lower()
-                    row['similarity'] = "yes" if tracing_valid == "yes" else "no"
-                else:
-                    # For "partial" or "skipped", use tracing_valid as the indicator
-                    # Since similarity should compare debug_tracings, and tracing_valid does that,
-                    # we can use tracing_valid as a proxy for similarity
-                    tracing_valid = row.get('tracing_valid', '').strip().lower()
-                    if tracing_valid == "yes":
-                        # Tracing steps match, so debug_tracings are similar
-                        row['similarity'] = "yes"
-                    elif tracing_valid == "no":
-                        # Tracing steps don't match, so debug_tracings are different
-                        row['similarity'] = "no"
+            # Initialize content_similarity if not set (should always be set from Maxim, but ensure it exists)
+            if 'content_similarity' not in row or not row.get('content_similarity'):
+                row['content_similarity'] = ""
+            
+            # If tracing_similarity is still empty or only whitespace, calculate it from debug_tracing comparison
+            # But first check if expected output has debug_tracing - if not, skip similarity
+            if not row.get('tracing_similarity') or not row.get('tracing_similarity').strip():
+                # Check if expected output has debug_tracing
+                expected_output_str = row.get('expected_output', '')
+                has_expected_tracing = False
+                try:
+                    if isinstance(expected_output_str, str):
+                        try:
+                            expected_dict = json.loads(expected_output_str)
+                        except (json.JSONDecodeError, ValueError):
+                            try:
+                                expected_dict = ast.literal_eval(expected_output_str)
+                            except (ValueError, SyntaxError):
+                                expected_dict = {}
                     else:
-                        # tracing_valid is "skipped" or "error"
-                        row['similarity'] = "no"  # Default to "no" if uncertain
-                similarity_calculated_count += 1
+                        expected_dict = expected_output_str
+                    
+                    expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+                    has_expected_tracing = expected_tracing is not None
+                except Exception:
+                    has_expected_tracing = False
+                
+                if has_expected_tracing:
+                    calculated_similarity = calculate_similarity_from_tracing(
+                        expected_output_str,
+                        row.get('actual_output', '')
+                    )
+                    # Use calculated similarity if it's "yes", otherwise use tracing_valid as indicator
+                    if calculated_similarity == "yes":
+                        row['tracing_similarity'] = "yes"
+                    elif calculated_similarity == "error":
+                        # If calculation failed, use tracing_valid as fallback
+                        tracing_valid = row.get('tracing_valid', '').strip().lower()
+                        row['tracing_similarity'] = "yes" if tracing_valid == "yes" else "no"
+                    else:
+                        # For "partial" or "skipped", use tracing_valid as the indicator
+                        # Since tracing_similarity should compare debug_tracings, and tracing_valid does that,
+                        # we can use tracing_valid as a proxy for tracing_similarity
+                        tracing_valid = row.get('tracing_valid', '').strip().lower()
+                        if tracing_valid == "yes":
+                            # Tracing steps match, so debug_tracings are similar
+                            row['tracing_similarity'] = "yes"
+                        elif tracing_valid == "no":
+                            # Tracing steps don't match, so debug_tracings are different
+                            row['tracing_similarity'] = "no"
+                        else:
+                            # tracing_valid is "skipped" or "error"
+                            row['tracing_similarity'] = "no"  # Default to "no" if uncertain
+                    similarity_calculated_count += 1
+                else:
+                    # Expected output has no debug_tracing, so skip tracing_similarity
+                    row['tracing_similarity'] = ""
             
             updated_rows.append(row)
     
@@ -1581,7 +1985,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     
     # Write updated data back
     # Preserve schema_valid, schema_errors, tracing_valid, and tracing_errors if they exist in the rows
-    all_fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'similarity']
+    all_fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
     # Check what fields actually exist in the rows (for backward compatibility)
     if updated_rows:
         existing_fields = set(updated_rows[0].keys())
@@ -1594,16 +1998,352 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str])
     else:
         fieldnames = all_fieldnames
     
+    print(f"\n  ✓ Matched {matched_count}/{len(updated_rows)} rows with Maxim scores")
+    if similarity_calculated_count > 0:
+        print(f"  📊 Calculated similarity from debug_tracing for {similarity_calculated_count} rows")
+    
+    # Write updated CSV
+    print(f"\n💾 Writing updated CSV to: {raw_csv_filename}")
     with open(raw_csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(updated_rows)
     
-    print(f"\n✓ Updated {matched_count}/{len(updated_rows)} rows with Maxim scores")
-    if similarity_calculated_count > 0:
-        print(f"  Calculated similarity from debug_tracing for {similarity_calculated_count} rows (Maxim scores not available)")
+    print(f"  ✓ Successfully wrote {len(updated_rows)} rows to CSV")
+    print(f"\n✅ CSV file updated successfully: {raw_csv_filename}\n")
     
     return raw_csv_filename
+
+
+def fetch_test_run_entries_paginated(test_run_id: str, workspace_id: str, api_key: str, max_entries: Optional[int] = None) -> List[Dict]:
+    """
+    Fetch ALL entries from a Maxim test run with pagination.
+    
+    Args:
+        test_run_id: The test run ID to fetch entries for
+        workspace_id: The Maxim workspace ID
+        api_key: The Maxim API key
+        max_entries: Optional limit on the number of entries to fetch
+    
+    Returns:
+        List of entry dictionaries
+    """
+    all_entries = []
+    page_size = 100
+    page_num = 1
+    max_pages = 100  # Safety limit on number of pages to prevent excessive requests
+    
+    url = "https://api.getmaxim.ai/v1/test-runs/entries"
+    headers = {"x-maxim-api-key": api_key}
+    
+    while page_num <= max_pages:
+        if max_entries and len(all_entries) >= max_entries:
+            break
+            
+        current_page_size = min(page_size, max_entries - len(all_entries)) if max_entries else page_size
+        
+        params = {
+            "workspaceId": workspace_id,
+            "id": test_run_id,
+            "limit": current_page_size,
+            "offset": len(all_entries)
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data or 'data' not in data:
+                break
+            
+            entries = data['data'].get('entries', [])
+            if not entries:
+                break
+            
+            all_entries.extend(entries)
+            
+            # Print progress every 5 pages
+            if page_num % 5 == 0:
+                print(f"    Page {page_num}: fetched {len(entries)} entries (total: {len(all_entries)})")
+            
+            # Stop if we got fewer entries than requested
+            if len(entries) < current_page_size:
+                break
+            
+            page_num += 1
+            
+        except requests.exceptions.RequestException as e:
+            print(f"    ⚠️  Error fetching page {page_num}: {e}")
+            break
+    
+    return all_entries
+
+
+def generate_final_csv_from_test_run(
+    content_similarity_test_run_id: str,
+    output_filename: str,
+    expected_count: int = None,
+    tracing_similarity_test_run_id: str = None
+) -> str:
+    """
+    Generate the final CSV directly from Maxim test run entries.
+    This is the most reliable approach - no matching needed.
+    
+    Each Maxim entry contains input, expectedOutput, output, and evaluation scores.
+    We run local validations (schema, tracing) on each entry.
+    
+    Args:
+        content_similarity_test_run_id: Maxim test run ID for content similarity evaluation
+        output_filename: Path to save the final CSV
+        expected_count: Expected number of entries (for progress display)
+        tracing_similarity_test_run_id: Maxim test run ID for tracing similarity evaluation (optional)
+    
+    Returns:
+        Path to the generated CSV file
+    """
+    print(f"\n{'='*60}")
+    print("📋 GENERATING FINAL CSV FROM MAXIM RESULTS")
+    print(f"{'='*60}")
+    print(f"Content Similarity Test Run: {content_similarity_test_run_id}")
+    if tracing_similarity_test_run_id:
+        print(f"Tracing Similarity Test Run: {tracing_similarity_test_run_id}")
+    print(f"Output File: {output_filename}")
+    if expected_count:
+        print(f"Expected Entries: {expected_count}")
+    print()
+    
+    # Read existing raw CSV to get input -> (conversation_id, original_row_index) mapping 
+    # (we don't send conversation_id/original_row_index to Maxim)
+    conversation_id_lookup = {}
+    original_row_index_lookup = {}
+    if os.path.exists(output_filename):
+        try:
+            with open(output_filename, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    input_text = row.get('input', '').strip()
+                    conv_id = row.get('conversation_id', '')
+                    orig_idx = row.get('original_row_index', '0')
+                    if input_text and conv_id:
+                        conversation_id_lookup[input_text] = conv_id
+                    if input_text:
+                        original_row_index_lookup[input_text] = orig_idx
+            print(f"📝 Loaded {len(conversation_id_lookup)} conversation_id mappings from existing CSV")
+            print(f"📝 Loaded {len(original_row_index_lookup)} original_row_index mappings from existing CSV")
+        except Exception as e:
+            print(f"⚠️  Could not load mappings from existing CSV: {e}")
+    
+    # Fetch ALL entries from content similarity test run
+    print("📥 Fetching entries from content similarity test run...")
+    content_entries = fetch_test_run_entries_paginated(
+        test_run_id=content_similarity_test_run_id,
+        workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
+        api_key=adopt_env.MAXIM_API_KEY,
+        max_entries=expected_count
+    )
+    
+    if not content_entries:
+        print("❌ No entries found in content similarity test run!")
+        return output_filename
+    
+    print(f"✓ Fetched {len(content_entries)} entries from content similarity test run\n")
+    
+    # Fetch tracing similarity entries if test run ID provided
+    tracing_similarity_lookup = {}
+    if tracing_similarity_test_run_id:
+        print("📥 Fetching entries from tracing similarity test run...")
+        tracing_entries = fetch_test_run_entries_paginated(
+            test_run_id=tracing_similarity_test_run_id,
+            workspace_id=adopt_env.MAXIM_WORKSPACE_ID,
+            api_key=adopt_env.MAXIM_API_KEY,
+            max_entries=expected_count
+        )
+        
+        if tracing_entries:
+            print(f"✓ Fetched {len(tracing_entries)} entries from tracing similarity test run\n")
+            
+            # Build lookup by input text for tracing similarity
+            for entry in tracing_entries:
+                input_text = entry.get('input', {}).get('payload', '').strip()
+                stats = entry.get('stats', {})
+                pass_fail_results = stats.get('overallPassFailResult', [])
+                
+                # Extract tracing similarity from General LLM Judge
+                tracing_sim = ""
+                for evaluator_name in ['General LLM Judge', 'Ragas Answer Semantic Similarity']:
+                    for result in pass_fail_results:
+                        if result.get('name') == evaluator_name:
+                            tracing_sim = "yes" if result.get('value', {}).get('pass', False) else "no"
+                            break
+                    if tracing_sim:
+                        break
+                
+                tracing_similarity_lookup[input_text] = tracing_sim
+        else:
+            print("⚠️  No entries found in tracing similarity test run - using local validation\n")
+    
+    # Generate CSV rows with local validations
+    print("📝 Processing entries with local validations...")
+    rows = []
+    
+    for idx, entry in enumerate(content_entries):
+        try:
+            # Extract data from Maxim entry
+            input_text = entry.get('input', {}).get('payload', '')
+            expected_output = entry.get('expectedOutput', {}).get('payload', '')
+            actual_output = entry.get('output', {}).get('payload', '')
+            
+            # Extract Maxim pass/fail results
+            stats = entry.get('stats', {})
+            pass_fail_results = stats.get('overallPassFailResult', [])
+            
+            # Extract bias (yes = passed bias check = no bias detected)
+            bias = ""
+            for result in pass_fail_results:
+                if result.get('name') == 'Bias':
+                    bias = "yes" if result.get('value', {}).get('pass', False) else "no"
+                    break
+            
+            # Extract content similarity (prefer General LLM Judge)
+            content_similarity = ""
+            for evaluator_name in ['General LLM Judge', 'Ragas Answer Semantic Similarity']:
+                for result in pass_fail_results:
+                    if result.get('name') == evaluator_name:
+                        content_similarity = "yes" if result.get('value', {}).get('pass', False) else "no"
+                        break
+                if content_similarity:
+                    break
+            
+            # Check if expected_output has debug_tracing
+            has_expected_tracing = False
+            try:
+                if isinstance(expected_output, str):
+                    try:
+                        expected_dict = json.loads(expected_output)
+                    except:
+                        try:
+                            expected_dict = ast.literal_eval(expected_output)
+                        except:
+                            expected_dict = {}
+                else:
+                    expected_dict = expected_output
+                has_expected_tracing = bool(expected_dict.get('debug_tracing') if isinstance(expected_dict, dict) else False)
+            except:
+                pass
+            
+            # Run local schema validation
+            schema_valid, schema_errors = validate_response_schema(expected_output, actual_output)
+            
+            # Run local tracing validation (only if expected has debug_tracing)
+            if has_expected_tracing:
+                tracing_valid, tracing_errors = validate_tracing(expected_output, actual_output)
+                
+                # Get tracing_similarity from Maxim if available, otherwise use local tracing_valid
+                input_stripped = input_text.strip()
+                if input_stripped in tracing_similarity_lookup:
+                    tracing_similarity = tracing_similarity_lookup[input_stripped]
+                else:
+                    # Fallback to local validation result
+                    tracing_similarity = tracing_valid if tracing_valid in ['yes', 'no'] else ''
+            else:
+                tracing_valid = 'skipped'
+                tracing_errors = 'No debug_tracing found in expected_output'
+                tracing_similarity = ''
+            
+            # Get conversation_id and original_row_index from lookup (we preserve from raw CSV since Maxim doesn't store them)
+            conversation_id = conversation_id_lookup.get(input_text.strip(), '')
+            original_row_index = original_row_index_lookup.get(input_text.strip(), '0')
+            
+            row = {
+                'original_row_index': original_row_index,
+                'conversation_id': conversation_id,
+                'input': input_text,
+                'expected_output': expected_output,
+                'actual_output': actual_output,
+                'schema_valid': schema_valid,
+                'schema_errors': schema_errors.replace('\n', '\\n') if schema_errors else '',
+                'tracing_valid': tracing_valid,
+                'tracing_errors': tracing_errors.replace('\n', '\\n') if tracing_errors else '',
+                'bias': bias,
+                'tracing_similarity': tracing_similarity,
+                'content_similarity': content_similarity,
+            }
+            
+            rows.append(row)
+            
+            # Progress
+            if (idx + 1) % 100 == 0:
+                print(f"  Processed {idx + 1}/{len(content_entries)} entries...")
+                
+        except Exception as e:
+            print(f"  ⚠️  Error processing entry {idx}: {e}")
+            continue
+    
+    # Sort rows by original_row_index to preserve exact input CSV order
+    rows.sort(key=lambda r: int(r.get('original_row_index', 0)))
+    print(f"📋 Sorted {len(rows)} rows by original order")
+    
+    # Write CSV
+    fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 
+                  'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+    
+    print(f"\n💾 Writing {len(rows)} rows to: {output_filename}")
+    with open(output_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print("📊 RESULTS SUMMARY")
+    print(f"{'='*60}")
+    
+    if rows:
+        # Content similarity (from Maxim)
+        content_pass = sum(1 for r in rows if r['content_similarity'] == 'yes')
+        content_fail = sum(1 for r in rows if r['content_similarity'] == 'no')
+        content_total = content_pass + content_fail
+        if content_total > 0:
+            print(f"Content Similarity (Maxim): {content_pass}/{content_total} passed ({content_pass/content_total*100:.1f}%)")
+        
+        # Tracing similarity (from Maxim if available)
+        tracing_sim_pass = sum(1 for r in rows if r['tracing_similarity'] == 'yes')
+        tracing_sim_fail = sum(1 for r in rows if r['tracing_similarity'] == 'no')
+        tracing_sim_skip = sum(1 for r in rows if r['tracing_similarity'] == '')
+        tracing_sim_total = tracing_sim_pass + tracing_sim_fail
+        source = "Maxim" if tracing_similarity_test_run_id else "Local"
+        if tracing_sim_total > 0:
+            print(f"Tracing Similarity ({source}): {tracing_sim_pass}/{tracing_sim_total} passed ({tracing_sim_pass/tracing_sim_total*100:.1f}%), {tracing_sim_skip} skipped")
+        elif tracing_sim_skip > 0:
+            print(f"Tracing Similarity: {tracing_sim_skip} skipped (no debug_tracing in expected)")
+        
+        # Bias check (from Maxim)
+        bias_pass = sum(1 for r in rows if r['bias'] == 'yes')  # yes = no bias detected
+        bias_fail = sum(1 for r in rows if r['bias'] == 'no')
+        bias_total = bias_pass + bias_fail
+        if bias_total > 0:
+            print(f"Bias Check (Maxim): {bias_pass}/{bias_total} passed - no bias ({bias_pass/bias_total*100:.1f}%)")
+        
+        # Schema validation (local)
+        schema_pass = sum(1 for r in rows if r['schema_valid'] == 'yes')
+        schema_fail = sum(1 for r in rows if r['schema_valid'] == 'no')
+        schema_total = schema_pass + schema_fail
+        if schema_total > 0:
+            print(f"Schema Valid (Local): {schema_pass}/{schema_total} passed ({schema_pass/schema_total*100:.1f}%)")
+        
+        # Tracing validation (local)
+        tracing_pass = sum(1 for r in rows if r['tracing_valid'] == 'yes')
+        tracing_fail = sum(1 for r in rows if r['tracing_valid'] == 'no')
+        tracing_skip = sum(1 for r in rows if r['tracing_valid'] == 'skipped')
+        tracing_total = tracing_pass + tracing_fail
+        if tracing_total > 0:
+            print(f"Tracing Valid (Local): {tracing_pass}/{tracing_total} passed ({tracing_pass/tracing_total*100:.1f}%), {tracing_skip} skipped")
+        elif tracing_skip > 0:
+            print(f"Tracing Valid (Local): {tracing_skip} skipped (no debug_tracing in expected)")
+    
+    print(f"\n✅ Final CSV generated: {output_filename}")
+    return output_filename
 
 
 def load_existing_results_from_csv(csv_file_path: str) -> Tuple[List[Dict], List[Tuple[Dict, YieldedOutput]]]:
@@ -1634,13 +2374,8 @@ def load_existing_results_from_csv(csv_file_path: str) -> Tuple[List[Dict], List
             expected_output = row.get('expected_output', '').strip()
             actual_output = row.get('actual_output', '').strip()
             
-            # Skip rows with missing data
-            if not input_text or not expected_output or not actual_output:
-                skipped += 1
-                continue
-            
-            # Skip rows where actual_output is an error
-            if actual_output.startswith('Error:'):
+            # Skip only if input or expected_output is missing (but allow missing/error actual_output)
+            if not input_text or not expected_output:
                 skipped += 1
                 continue
             
@@ -1649,6 +2384,10 @@ def load_existing_results_from_csv(csv_file_path: str) -> Tuple[List[Dict], List
                 "expected_output": expected_output,
                 "context": "",
             }
+            
+            # If actual_output is missing or empty, use empty string
+            if not actual_output:
+                actual_output = ""
             
             # Unescape newlines in actual_output (they were escaped when saving)
             actual_output_unescaped = actual_output.replace('\\n', '\n')
@@ -1665,6 +2404,28 @@ def load_existing_results_from_csv(csv_file_path: str) -> Tuple[List[Dict], List
         print(f"⚠️  Skipped {skipped} rows with missing/error data")
     
     return test_data, all_results
+
+
+def get_test_run_status(test_run_id: str, workspace_id: str, api_key: str):
+    """Get test run status from Maxim API to get total entry count"""
+    url = "https://api.getmaxim.ai/v1/test-runs"
+    
+    headers = {
+        "x-maxim-api-key": api_key
+    }
+    
+    params = {
+        "workspaceId": workspace_id,
+        "id": test_run_id
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch test run status: {e}")
+        return None
 
 
 def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str, limit: int = 1000, offset: int = 0):
@@ -1691,9 +2452,16 @@ def fetch_test_run_entries(test_run_id: str, workspace_id: str, api_key: str, li
         return None
 
 
-def fetch_all_test_run_entries(test_run_id: str, workspace_id: str, api_key: str):
+def fetch_all_test_run_entries(test_run_id: str, workspace_id: str, api_key: str, needed_inputs: set = None, max_entries: int = None):
     """Fetch all test run entries from Maxim API, handling pagination automatically.
     Continues fetching until all entries are retrieved, regardless of count (200, 2000, etc.)
+    
+    Args:
+        test_run_id: The Maxim test run ID
+        workspace_id: The Maxim workspace ID
+        api_key: The Maxim API key
+        needed_inputs: Optional set of input texts we need scores for. If provided, stops early once all are found.
+        max_entries: Optional limit on entries to fetch. If None, fetches all.
     """
     all_entries = []
     offset = 0
@@ -1702,6 +2470,31 @@ def fetch_all_test_run_entries(test_run_id: str, workspace_id: str, api_key: str
     max_pages = 1000  # Safety limit to prevent infinite loops (1000 pages = 100k entries)
     consecutive_empty_pages = 0
     
+    # Track which inputs we've found (if needed_inputs is provided)
+    found_inputs = set() if needed_inputs is not None else None
+    
+    # First, try to get the total count from the test run status
+    expected_total = None
+    try:
+        print(f"    🔍 Getting test run status...")
+        status_response = get_test_run_status(test_run_id, workspace_id, api_key)
+        if status_response and 'data' in status_response:
+            # Try to get totalEntries from stats if not directly available
+            if 'stats' in status_response['data']:
+                expected_total = status_response['data']['stats'].get('totalEntries')
+            if not expected_total:
+                expected_total = status_response['data'].get('totalEntries')
+            if expected_total:
+                print(f"    📊 Expected total entries in test run: {expected_total}")
+        
+        if needed_inputs is not None:
+            print(f"    🎯 Looking for {len(needed_inputs)} specific inputs from CSV")
+        if max_entries is not None:
+            print(f"    🎯 Max entries to fetch: {max_entries}")
+    except Exception as e:
+        print(f"    ⚠️  Could not fetch test run status: {e}")
+    
+    print(f"    📥 Fetching entries (page by page)...")
     while page_num <= max_pages:
         response = fetch_test_run_entries(test_run_id, workspace_id, api_key, limit=page_size, offset=offset)
         
@@ -1724,7 +2517,35 @@ def fetch_all_test_run_entries(test_run_id: str, workspace_id: str, api_key: str
         
         consecutive_empty_pages = 0  # Reset counter on successful fetch
         all_entries.extend(entries)
-        print(f"    Fetched page {page_num}: {len(entries)} entries (total so far: {len(all_entries)})")
+        
+        # Track which needed inputs we've found
+        if found_inputs is not None:
+            for entry in entries:
+                input_text = entry['input']['payload'].strip()
+                if input_text in needed_inputs:
+                    found_inputs.add(input_text)
+        
+        # Print progress every 5 pages or on first/last page
+        if page_num == 1 or page_num % 5 == 0 or len(entries) < page_size:
+            if found_inputs is not None:
+                print(f"      Page {page_num}: {len(entries)} entries (found {len(found_inputs)}/{len(needed_inputs)} needed, total fetched: {len(all_entries)})")
+            else:
+                print(f"      Page {page_num}: {len(entries)} entries (total: {len(all_entries)})")
+        
+        # EARLY EXIT: If we've found all needed inputs, stop!
+        if found_inputs is not None and len(found_inputs) >= len(needed_inputs):
+            print(f"    ✓ Found all {len(needed_inputs)} needed inputs! Stopping early.")
+            break
+        
+        # EARLY EXIT: If we've reached max_entries limit, stop!
+        if max_entries is not None and len(all_entries) >= max_entries:
+            print(f"    ✓ Reached max entries limit: {max_entries}")
+            break
+        
+        # Check if we've reached the expected total from test run status
+        if expected_total is not None and len(all_entries) >= expected_total:
+            print(f"    ✓ Reached expected total count: {expected_total}")
+            break
         
         # Check if there's pagination metadata indicating more results
         data = response.get('data', {})
@@ -1753,7 +2574,7 @@ def fetch_all_test_run_entries(test_run_id: str, workspace_id: str, api_key: str
     if page_num > max_pages:
         print(f"    ⚠️  Reached safety limit of {max_pages} pages, stopping")
     
-    print(f"    Total entries fetched: {len(all_entries)}")
+    print(f"    ✓ Total entries fetched: {len(all_entries)}\n")
     
     # Return in the same format as the original function
     return {
@@ -1805,24 +2626,45 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
             actual_output = entry['output']['payload']
             expected_output = entry['expectedOutput']['payload']
             
-            # Extract individual evaluator scores
+            # Extract individual evaluator scores (pass/fail)
             stats = entry.get('stats', {})
-            overall_results = stats.get('overallEvaluatorMeanResult', [])
             pass_fail_results = stats.get('overallPassFailResult', [])
             
-            # Find Bias score
-            bias_score = 0
-            for result in overall_results:
+            # Find Bias pass/fail
+            bias_score = "no"
+            for result in pass_fail_results:
                 if result['name'] == 'Bias':
-                    bias_score = result['value']
+                    bias_score = "yes" if result.get('value', {}).get('pass', False) else "no"
                     break
             
-            # Find Similarity pass/fail
+            # Similarity is fetched from Maxim (prefer General LLM Judge over Ragas)
             similarity = "no"
-            for result in pass_fail_results:
-                if result['name'] == 'Ragas Answer Semantic Similarity':
-                    similarity = "yes" if result['value']['pass'] else "no"
+            for evaluator_name in ['General LLM Judge', 'Ragas Answer Semantic Similarity']:
+                for result in pass_fail_results:
+                    if result['name'] == evaluator_name:
+                        similarity = "yes" if result.get('value', {}).get('pass', False) else "no"
+                        break
+                if similarity != "no":
                     break
+            
+            # Check if expected output has debug_tracing before setting tracing_similarity
+            has_expected_tracing = False
+            try:
+                if isinstance(expected_output, str):
+                    try:
+                        expected_dict = json.loads(expected_output)
+                    except (json.JSONDecodeError, ValueError):
+                        try:
+                            expected_dict = ast.literal_eval(expected_output)
+                        except (ValueError, SyntaxError):
+                            expected_dict = {}
+                else:
+                    expected_dict = expected_output
+                
+                expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+                has_expected_tracing = expected_tracing is not None
+            except Exception:
+                has_expected_tracing = False
             
             # Escape newlines in actual output to match expected output format
             actual_output_escaped = actual_output.replace('\n', '\\n')
@@ -1841,7 +2683,15 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
             )
             tracing_errors_csv = tracing_errors.replace('\n', '\\n') if tracing_errors else ""
             
+            # Calculate tracing similarity from tracing_valid
+            if has_expected_tracing:
+                tracing_similarity = tracing_valid if tracing_valid in ("yes", "no") else "no"
+            else:
+                tracing_similarity = ""
+            
             all_csv_data.append({
+                'original_row_index': len(all_csv_data),  # Preserve order from Maxim when fetching historical runs
+                'conversation_id': '',  # Not available when fetching from Maxim historical runs
                 'input': input_text,
                 'expected_output': expected_output,
                 'actual_output': actual_output_escaped,
@@ -1850,7 +2700,8 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
                 'tracing_valid': tracing_valid,
                 'tracing_errors': tracing_errors_csv,
                 'bias': bias_score,
-                'similarity': similarity
+                'tracing_similarity': tracing_similarity,
+                'content_similarity': ''  # Will be filled if content similarity test run is processed separately
             })
     
     if not all_csv_data:
@@ -1860,7 +2711,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
     # Write to CSV file
     try:
         with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'style_valid', 'style_errors', 'bias', 'similarity']
+            fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
@@ -1943,7 +2794,7 @@ Examples:
         '--batch-size',
         type=int,
         default=MAX_PARALLEL_PROMPTS,
-        help=f'Maximum number of prompts to process in parallel (default: {MAX_PARALLEL_PROMPTS})'
+        help=f'Maximum number of prompts/conversations to process in parallel. For multi-turn conversations (with input_id), this controls parallel conversations, not individual turns. Turns within each conversation are always processed sequentially in CSV order. (default: {MAX_PARALLEL_PROMPTS})'
     )
     
     parser.add_argument(
@@ -1967,6 +2818,12 @@ Examples:
         help='Skip all Maxim evaluation runs. Results will still be saved to CSV but without Maxim scores.'
     )
     
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Bypass LLM caching by appending a unique request ID to each input. The ID is added as metadata that does not affect the semantic meaning.'
+    )
+    
     args = parser.parse_args()
     
     # Initialize Maxim SDK only if not skipping
@@ -1979,7 +2836,7 @@ Examples:
         if not adopt_env.MAXIM_WORKSPACE_ID:
             raise ValueError("MAXIM_WORKSPACE_ID environment variable is required")
         
-        maxim_client = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY })
+        maxim_client = maxim.Maxim({"api_key": adopt_env.MAXIM_API_KEY})
     else:
         print("⚠️  --skip-maxim flag is set - Maxim evaluation will be skipped")
         maxim_client = None
@@ -2006,26 +2863,32 @@ Examples:
                 print("❌ No valid results to evaluate. Exiting.")
                 return
             
-            # Send to Maxim
-            print("\n📤 Sending to Maxim for evaluation...")
-            test_run_id = send_all_results_to_maxim(
+            # Send to Maxim for BOTH evaluations
+            print("\n📤 Sending to Maxim for tracing similarity evaluation...")
+            tracing_test_run_id = send_all_results_to_maxim(
+                test_data=test_data,
+                all_results=all_results
+            )
+            
+            print("\n📤 Sending to Maxim for content similarity evaluation...")
+            content_test_run_id = send_content_similarity_to_maxim(
                 test_data=test_data,
                 all_results=all_results
             )
             
             maxim_time = time.time() - maxim_start_time
             
-            if test_run_id:
-                # Generate output filename based on input filename
-                base_name = os.path.splitext(os.path.basename(args.maxim_only))[0]
-                output_file = os.path.join(
-                    os.path.dirname(args.maxim_only),
-                    f"{base_name}_with_scores.csv"
+            if tracing_test_run_id or content_test_run_id:
+                # Generate final CSV directly from Maxim entries
+                # - content_similarity from content_test_run_id
+                # - tracing_similarity from tracing_test_run_id
+                print(f"\n📊 Generating final CSV from Maxim results...")
+                generate_final_csv_from_test_run(
+                    content_similarity_test_run_id=content_test_run_id or tracing_test_run_id,
+                    output_filename=args.maxim_only,
+                    expected_count=len(all_results),
+                    tracing_similarity_test_run_id=tracing_test_run_id
                 )
-                
-                # Update the original CSV with scores
-                print(f"\n📊 Updating CSV with Maxim scores...")
-                update_csv_with_maxim_scores(args.maxim_only, [test_run_id])
                 
                 print("\n" + "=" * 60)
                 print("✅ MAXIM-ONLY MODE COMPLETE")
@@ -2054,7 +2917,6 @@ Examples:
     print(f"Loaded {len(test_data)} test cases from CSV")
     print("✓ Schema validation enabled: Validating actual output structure against expected_output schema")
     print("✓ Tracing validation enabled: Validating execution steps, tools, APIs, and methods from debug_tracing")
-    print("✓ Style validation enabled: Validating output_type and format (table/list) via Maxim semantic evaluation")
     
     if exclude_fields:
         print(f"Excluding fields from response: {', '.join(exclude_fields)}")
@@ -2073,6 +2935,9 @@ Examples:
     
     print(f"Batch size: {args.batch_size} parallel prompts")
     print(f"Max retries for 503/504 errors: {args.max_retries}")
+    
+    if args.no_cache:
+        print("🔄 Cache bypass enabled: Unique request IDs will be appended to inputs")
 
     # Load the adopt profile configuration once
     profile = load_adopt_profile()
@@ -2085,7 +2950,7 @@ Examples:
     try:
         # Create a wrapper function for calling the agent with profile and settings
         def call_local_agent_with_profile(data):
-            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout, args.max_items)
+            return call_local_agent(data, profile, access_token, exclude_fields, args.timeout, args.max_items, args.no_cache)
         
         print(f"\n{'='*50}")
         print(f"PROCESSING PROMPTS IN BATCHES (max {args.batch_size} parallel)")
@@ -2155,7 +3020,11 @@ Examples:
             print(f"  ✓ Batch {batch_number} complete: {len(batch_results)} results collected")
             print(f"  ⏱️  Batch time: {batch_elapsed_time:.2f}s")
             print(f"  Total collected so far: {len(all_results)}")
-        
+            
+            # # Sleep 1 second between batches (if more batches to process)
+            # if pending_data:
+            #     time.sleep(1.0)
+
         print(f"\n{'='*50}")
         print(f"ALL BATCHES COMPLETE")
         print(f"{'='*50}")
@@ -2168,6 +3037,10 @@ Examples:
             print(f"\n{'='*50}")
             print(f"SKIPPING MAXIM EVALUATION (--skip-maxim flag is set)")
             print(f"{'='*50}")
+            
+            # Sort the CSV by conversation_id to group related conversations together
+            sort_csv_by_conversation_id(raw_csv_filename)
+            
             print(f"📄 Raw results saved to: {raw_csv_filename}")
             print(f"⚠️  Maxim evaluation skipped - no scores added")
         else:
@@ -2186,15 +3059,32 @@ Examples:
                     all_results=all_results
                 )
                 
+                # Also send content similarity evaluation
+                content_similarity_test_run_id = send_content_similarity_to_maxim(
+                    test_data=test_data,
+                    all_results=all_results
+                )
+                
                 maxim_elapsed_time = time.time() - maxim_start_time
                 
                 if test_run_id:
                     print(f"✓ Results sent to Maxim (test run: {test_run_id})")
                     print(f"⏱️  Maxim evaluation time: {maxim_elapsed_time:.2f}s")
                     
-                    # Phase 3: Update CSV with Maxim scores
-                    print("\nUpdating CSV with Maxim evaluation scores...")
-                    update_csv_with_maxim_scores(raw_csv_filename, [test_run_id])
+                    if content_similarity_test_run_id:
+                        print(f"✓ Content similarity sent to Maxim (test run: {content_similarity_test_run_id})")
+                    
+                    # Phase 3: Generate final CSV directly from Maxim entries
+                    # This is more reliable than matching by input text (handles duplicates)
+                    # - content_similarity comes from content_similarity_test_run_id (full output comparison)
+                    # - tracing_similarity comes from test_run_id (debug_tracing comparison)
+                    print("\nGenerating final CSV from Maxim results...")
+                    generate_final_csv_from_test_run(
+                        content_similarity_test_run_id=content_similarity_test_run_id or test_run_id,
+                        output_filename=raw_csv_filename,
+                        expected_count=len(all_results),
+                        tracing_similarity_test_run_id=test_run_id  # This evaluates debug_tracing similarity
+                    )
                     print(f"\n📄 Final results saved to: {raw_csv_filename}")
                 else:
                     print("\n⚠️  Maxim evaluation failed.")
@@ -2265,29 +3155,6 @@ Examples:
                 # If CSV reading fails, just skip the summary
                 pass
         
-        # Display style validation summary if we have results
-        if all_results and os.path.exists(raw_csv_filename):
-            try:
-                df_results = pd.read_csv(raw_csv_filename)
-                if 'style_valid' in df_results.columns:
-                    style_valid_count = len(df_results[df_results['style_valid'] == 'yes'])
-                    style_invalid_count = len(df_results[df_results['style_valid'] == 'no'])
-                    style_empty_count = len(df_results[df_results['style_valid'] == ''])
-                    total_style_tested = len(df_results) - style_empty_count
-                    
-                    print(f"\n{'='*50}")
-                    print(f"OUTPUT STYLE VALIDATION SUMMARY (via Maxim)")
-                    print(f"{'='*50}")
-                    print(f"✓ Valid styles:   {style_valid_count}")
-                    print(f"✗ Invalid styles: {style_invalid_count}")
-                    if style_empty_count > 0:
-                        print(f"⊘ Not evaluated: {style_empty_count} (awaiting Maxim results)")
-                    if total_style_tested > 0:
-                        success_rate = (style_valid_count / total_style_tested) * 100
-                        print(f"\nStyle validation pass rate: {success_rate:.1f}%")
-            except Exception as e:
-                # If CSV reading fails, just skip the summary
-                pass
         
         # Display error log if there were any errors
         if error_log:
