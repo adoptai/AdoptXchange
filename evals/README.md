@@ -207,7 +207,7 @@ The bulk evaluation script supports the following command-line arguments:
 | `--exclude-fields` | `str` | Comma-separated list of fields to exclude from responses | None |
 | `--timeout` | `float` | Timeout in seconds for each LLM response. If exceeded, marks as "timed out" | None |
 | `--max-items` | `int` | Maximum number of items to keep in arrays/lists from responses | None |
-| `--batch-size` | `int` | Number of prompts to process in parallel | `10` |
+| `--batch-size` | `int` | Number of prompts/conversations to process in parallel. For multi-turn conversations, controls parallel conversations (turns are always sequential) | `10` |
 | `--max-retries` | `int` | Maximum retry attempts for 503/504 HTTP errors | `3` |
 | `--skip-maxim` | flag | Skip all Maxim evaluation runs. Results saved to CSV without Maxim scores | `False` |
 | `--maxim-only` | `str` | Skip batch processing and only run Maxim eval on existing CSV file | None |
@@ -316,12 +316,18 @@ The evaluation system supports testing multi-turn conversations where follow-up 
    - All rows with the same `input_id` share the same `conversation_id`
    - This `conversation_id` is used as the trace ID when calling the API
 
-3. **Context Preservation:**
+3. **Sequential Turn Processing:**
+   - Turns within each conversation are processed **sequentially in CSV order**
+   - This ensures turn 2 can reference turn 1's results, turn 3 can reference turn 2, etc.
+   - Different conversations are processed in parallel for efficiency
+   - The `--batch-size` parameter controls how many conversations run in parallel
+
+4. **Context Preservation:**
    - The LLM maintains conversation context across turns
    - Follow-up questions can reference previous results
    - "Filter those...", "Sort them...", "Which one?" all work correctly
 
-4. **Results Grouping:**
+5. **Results Grouping:**
    - Output CSV includes `conversation_id` as the first column
    - Results are automatically sorted by `conversation_id`
    - Related conversation turns appear together

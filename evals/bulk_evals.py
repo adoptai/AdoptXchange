@@ -629,11 +629,12 @@ def load_test_data_from_csv(csv_file_path: str) -> list:
 
     # Convert to list of dictionaries
     test_data = []
-    for _, row in df.iterrows():
+    for row_index, (_, row) in enumerate(df.iterrows()):
         data_item = {
             "input": str(row["input"]).strip(),
             "expected_output": str(row["expected_output"]).strip(),
             "context": "",  # Optional context column, default to empty
+            "original_row_index": row_index,  # Track original CSV order for sorting
         }
         
         # Add conversation_id based on input_id (or generate new one if no input_id)
@@ -798,6 +799,84 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         )
 
 
+def process_conversation_sequentially(
+    conversation_turns: List[Dict],
+    call_agent_func,
+    max_retries: int,
+    retry_counts: Dict[str, int],
+    error_log: List[Dict]
+) -> List[Tuple[Dict, YieldedOutput]]:
+    """
+    Process a single conversation's turns sequentially (in order).
+    
+    Multi-turn conversations must be processed in order because each turn
+    depends on the previous turn's context.
+    
+    Args:
+        conversation_turns: List of test data dictionaries for one conversation (in order)
+        call_agent_func: Function to call for each prompt
+        max_retries: Maximum number of retry attempts
+        retry_counts: Dictionary tracking retry counts by input string
+        error_log: List to append error information to
+    
+    Returns:
+        List of (data, YieldedOutput) tuples for the conversation
+    """
+    results = []
+    
+    for turn_index, data in enumerate(conversation_turns):
+        input_key = data["input"]
+        
+        # Retry loop for this turn
+        success = False
+        while not success:
+            try:
+                result = call_agent_func(data)
+                # Check if the result itself contains an error
+                if result.data and str(result.data).startswith("Error:"):
+                    error_log.append({
+                        "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                        "error": str(result.data)
+                    })
+                results.append((data, result))
+                success = True
+            except RetryableHTTPError as e:
+                # Track retry count by input string
+                current_retries = retry_counts.get(input_key, 0)
+                if current_retries < max_retries:
+                    retry_counts[input_key] = current_retries + 1
+                    print(f"    ⚠️  Turn {turn_index + 1}: HTTP {e.status_code} - retrying (attempt {retry_counts[input_key]}/{max_retries})")
+                    time.sleep(RETRY_DELAY_SECONDS)
+                else:
+                    # Max retries exceeded, add error result
+                    error_msg = f"Error after {max_retries} retries: HTTP {e.status_code}"
+                    print(f"    ❌ Turn {turn_index + 1}: HTTP {e.status_code} - max retries exceeded")
+                    error_log.append({
+                        "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                        "error": error_msg
+                    })
+                    results.append((data, YieldedOutput(
+                        data=error_msg,
+                        retrieved_context_to_evaluate=data.get("context", ""),
+                    )))
+                    success = True  # Move on to next turn
+            except Exception as e:
+                # Non-retryable error
+                error_msg = f"Error: {str(e)}"
+                print(f"    ❌ Turn {turn_index + 1}: {error_msg}")
+                error_log.append({
+                    "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                    "error": error_msg
+                })
+                results.append((data, YieldedOutput(
+                    data=error_msg,
+                    retrieved_context_to_evaluate=data.get("context", ""),
+                )))
+                success = True  # Move on to next turn
+    
+    return results
+
+
 def process_single_batch(
     batch_data: List[Dict],
     call_agent_func,
@@ -809,54 +888,126 @@ def process_single_batch(
     """
     Process a single batch of prompts with parallel execution.
     
+    For multi-turn conversations (items with the same conversation_id), 
+    turns are processed sequentially to maintain context. Different 
+    conversations are processed in parallel.
+    
     Args:
         batch_data: List of test data dictionaries for this batch
         call_agent_func: Function to call for each prompt
-        max_parallel: Maximum number of prompts to process in parallel
+        max_parallel: Maximum number of conversations to process in parallel
         max_retries: Maximum number of retry attempts
         retry_counts: Dictionary tracking retry counts by input string
         error_log: List to append error information to
     
     Returns:
         Tuple of (successful_results, failed_prompts_to_retry)
+        Note: For multi-turn mode, failed_prompts is always empty since retries
+        are handled within process_conversation_sequentially
     """
     batch_results = []
     failed_prompts = []
     
-    # Process batch in parallel using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
-        # Submit all tasks
-        future_to_data = {
-            executor.submit(call_agent_func, data): data 
-            for data in batch_data
-        }
+    # Group data by conversation_id to identify multi-turn conversations
+    conversations: Dict[str, List[Dict]] = {}
+    for data in batch_data:
+        conv_id = data.get("conversation_id", str(uuid.uuid4()))
+        if conv_id not in conversations:
+            conversations[conv_id] = []
+        conversations[conv_id].append(data)
+    
+    # Check if we have multi-turn conversations (any conversation with > 1 turn)
+    has_multi_turn = any(len(turns) > 1 for turns in conversations.values())
+    
+    if has_multi_turn:
+        # Multi-turn mode: Process conversations in parallel, but turns within 
+        # each conversation sequentially
+        print(f"  📝 Multi-turn mode: {len(conversations)} conversations")
         
-        # Collect results as they complete
-        for future in as_completed(future_to_data):
-            data = future_to_data[future]
-            input_key = data["input"]
-            try:
-                result = future.result()
-                # Check if the result itself contains an error
-                if result.data and str(result.data).startswith("Error:"):
-                    error_log.append({
-                        "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
-                        "error": str(result.data)
-                    })
-                batch_results.append((data, result))
-            except RetryableHTTPError as e:
-                # Track retry count by input string
-                current_retries = retry_counts.get(input_key, 0)
-                truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
-                if current_retries < max_retries:
-                    retry_counts[input_key] = current_retries + 1
-                    print(f"  ⚠️  HTTP {e.status_code} - will retry (attempt {retry_counts[input_key]}/{max_retries})")
-                    print(f"      Prompt: {truncated_input}")
-                    failed_prompts.append(data)
-                else:
-                    # Max retries exceeded, add error result
-                    error_msg = f"Error after {max_retries} retries: HTTP {e.status_code}"
-                    print(f"  ❌ HTTP {e.status_code} - max retries exceeded")
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            # Submit each conversation as a unit
+            future_to_conv_id = {
+                executor.submit(
+                    process_conversation_sequentially,
+                    turns,
+                    call_agent_func,
+                    max_retries,
+                    retry_counts,
+                    error_log
+                ): conv_id
+                for conv_id, turns in conversations.items()
+            }
+            
+            # Collect results (order doesn't matter here since each conversation
+            # is processed in order internally)
+            for future in as_completed(future_to_conv_id):
+                conv_id = future_to_conv_id[future]
+                try:
+                    conversation_results = future.result()
+                    batch_results.extend(conversation_results)
+                except Exception as e:
+                    # Unexpected error at conversation level
+                    error_msg = f"Error processing conversation: {str(e)}"
+                    print(f"  ❌ Conversation {conv_id[:8]}...: {error_msg}")
+                    # Add error results for all turns in this conversation
+                    for data in conversations[conv_id]:
+                        error_log.append({
+                            "input": data["input"][:100] + "..." if len(data["input"]) > 100 else data["input"],
+                            "error": error_msg
+                        })
+                        batch_results.append((data, YieldedOutput(
+                            data=error_msg,
+                            retrieved_context_to_evaluate=data.get("context", ""),
+                        )))
+    else:
+        # Single-turn mode: Process all prompts in parallel (original behavior)
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            # Submit all tasks
+            future_to_data = {
+                executor.submit(call_agent_func, data): data 
+                for data in batch_data
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_data):
+                data = future_to_data[future]
+                input_key = data["input"]
+                try:
+                    result = future.result()
+                    # Check if the result itself contains an error
+                    if result.data and str(result.data).startswith("Error:"):
+                        error_log.append({
+                            "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                            "error": str(result.data)
+                        })
+                    batch_results.append((data, result))
+                except RetryableHTTPError as e:
+                    # Track retry count by input string
+                    current_retries = retry_counts.get(input_key, 0)
+                    truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
+                    if current_retries < max_retries:
+                        retry_counts[input_key] = current_retries + 1
+                        print(f"  ⚠️  HTTP {e.status_code} - will retry (attempt {retry_counts[input_key]}/{max_retries})")
+                        print(f"      Prompt: {truncated_input}")
+                        failed_prompts.append(data)
+                    else:
+                        # Max retries exceeded, add error result
+                        error_msg = f"Error after {max_retries} retries: HTTP {e.status_code}"
+                        print(f"  ❌ HTTP {e.status_code} - max retries exceeded")
+                        print(f"      Prompt: {truncated_input}")
+                        error_log.append({
+                            "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
+                            "error": error_msg
+                        })
+                        batch_results.append((data, YieldedOutput(
+                            data=error_msg,
+                            retrieved_context_to_evaluate=data.get("context", ""),
+                        )))
+                except Exception as e:
+                    # Non-retryable error
+                    error_msg = f"Error: {str(e)}"
+                    truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
+                    print(f"  ❌ {error_msg}")
                     print(f"      Prompt: {truncated_input}")
                     error_log.append({
                         "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
@@ -866,20 +1017,6 @@ def process_single_batch(
                         data=error_msg,
                         retrieved_context_to_evaluate=data.get("context", ""),
                     )))
-            except Exception as e:
-                # Non-retryable error
-                error_msg = f"Error: {str(e)}"
-                truncated_input = input_key[:80] + "..." if len(input_key) > 80 else input_key
-                print(f"  ❌ {error_msg}")
-                print(f"      Prompt: {truncated_input}")
-                error_log.append({
-                    "input": input_key[:100] + "..." if len(input_key) > 100 else input_key,
-                    "error": error_msg
-                })
-                batch_results.append((data, YieldedOutput(
-                    data=error_msg,
-                    retrieved_context_to_evaluate=data.get("context", ""),
-                )))
     
     return batch_results, failed_prompts
 
@@ -1186,7 +1323,7 @@ def initialize_raw_csv(csv_filename: str) -> None:
     import csv
     
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+        fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
     
@@ -1194,7 +1331,10 @@ def initialize_raw_csv(csv_filename: str) -> None:
 
 
 def sort_csv_by_conversation_id(csv_filename: str) -> None:
-    """Sort a CSV file by conversation_id to group related conversations together.
+    """Sort a CSV file by original_row_index to preserve the exact order from the input CSV.
+    
+    This ensures the output CSV matches the input CSV order exactly, which is important
+    for multi-turn conversations where turns must appear in the same order as submitted.
     
     Args:
         csv_filename: Path to the CSV file to sort
@@ -1217,8 +1357,9 @@ def sort_csv_by_conversation_id(csv_filename: str) -> None:
         print(f"⚠️  Cannot sort: no data in file: {csv_filename}")
         return
     
-    # Sort by conversation_id
-    rows.sort(key=lambda r: r.get('conversation_id', ''))
+    # Sort by original_row_index to preserve exact input CSV order
+    # This ensures multi-turn conversations appear in the same order as submitted
+    rows.sort(key=lambda r: int(r.get('original_row_index', 0)))
     
     # Write back sorted rows
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
@@ -1226,7 +1367,7 @@ def sort_csv_by_conversation_id(csv_filename: str) -> None:
         writer.writeheader()
         writer.writerows(rows)
     
-    print(f"📋 Sorted {len(rows)} rows by conversation_id")
+    print(f"📋 Sorted {len(rows)} rows by original order")
 
 
 def append_batch_to_csv(
@@ -1242,7 +1383,7 @@ def append_batch_to_csv(
     import csv
     
     with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-        fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+        fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
         for data, output in batch_results:
@@ -1307,6 +1448,7 @@ def append_batch_to_csv(
                 initial_similarity = ""
             
             writer.writerow({
+                'original_row_index': data.get('original_row_index', 0),
                 'conversation_id': data.get('conversation_id', ''),
                 'input': data['input'],
                 'expected_output': data['expected_output'],
@@ -1870,7 +2012,7 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str],
     
     # Write updated data back
     # Preserve schema_valid, schema_errors, tracing_valid, and tracing_errors if they exist in the rows
-    all_fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+    all_fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
     # Check what fields actually exist in the rows (for backward compatibility)
     if updated_rows:
         existing_fields = set(updated_rows[0].keys())
@@ -1998,8 +2140,10 @@ def generate_final_csv_from_test_run(
         print(f"Expected Entries: {expected_count}")
     print()
     
-    # Read existing raw CSV to get input -> conversation_id mapping (we don't send conversation_id to Maxim)
+    # Read existing raw CSV to get input -> (conversation_id, original_row_index) mapping 
+    # (we don't send conversation_id/original_row_index to Maxim)
     conversation_id_lookup = {}
+    original_row_index_lookup = {}
     if os.path.exists(output_filename):
         try:
             with open(output_filename, 'r', newline='', encoding='utf-8') as csvfile:
@@ -2007,11 +2151,15 @@ def generate_final_csv_from_test_run(
                 for row in reader:
                     input_text = row.get('input', '').strip()
                     conv_id = row.get('conversation_id', '')
+                    orig_idx = row.get('original_row_index', '0')
                     if input_text and conv_id:
                         conversation_id_lookup[input_text] = conv_id
+                    if input_text:
+                        original_row_index_lookup[input_text] = orig_idx
             print(f"📝 Loaded {len(conversation_id_lookup)} conversation_id mappings from existing CSV")
+            print(f"📝 Loaded {len(original_row_index_lookup)} original_row_index mappings from existing CSV")
         except Exception as e:
-            print(f"⚠️  Could not load conversation_id mappings: {e}")
+            print(f"⚠️  Could not load mappings from existing CSV: {e}")
     
     # Fetch ALL entries from content similarity test run
     print("📥 Fetching entries from content similarity test run...")
@@ -2130,10 +2278,12 @@ def generate_final_csv_from_test_run(
                 tracing_errors = 'No debug_tracing found in expected_output'
                 tracing_similarity = ''
             
-            # Get conversation_id from lookup (we preserve it from the raw CSV since Maxim doesn't store it)
+            # Get conversation_id and original_row_index from lookup (we preserve from raw CSV since Maxim doesn't store them)
             conversation_id = conversation_id_lookup.get(input_text.strip(), '')
+            original_row_index = original_row_index_lookup.get(input_text.strip(), '0')
             
             row = {
+                'original_row_index': original_row_index,
                 'conversation_id': conversation_id,
                 'input': input_text,
                 'expected_output': expected_output,
@@ -2157,12 +2307,12 @@ def generate_final_csv_from_test_run(
             print(f"  ⚠️  Error processing entry {idx}: {e}")
             continue
     
-    # Sort rows by conversation_id to group related conversations together
-    rows.sort(key=lambda r: r.get('conversation_id', ''))
-    print(f"📋 Sorted {len(rows)} rows by conversation_id")
+    # Sort rows by original_row_index to preserve exact input CSV order
+    rows.sort(key=lambda r: int(r.get('original_row_index', 0)))
+    print(f"📋 Sorted {len(rows)} rows by original order")
     
     # Write CSV
-    fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 
+    fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 
                   'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
     
     print(f"\n💾 Writing {len(rows)} rows to: {output_filename}")
@@ -2567,6 +2717,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
                 tracing_similarity = ""
             
             all_csv_data.append({
+                'original_row_index': len(all_csv_data),  # Preserve order from Maxim when fetching historical runs
                 'conversation_id': '',  # Not available when fetching from Maxim historical runs
                 'input': input_text,
                 'expected_output': expected_output,
@@ -2587,7 +2738,7 @@ def save_results_to_csv_from_test_runs(test_run_ids: List[str]):
     # Write to CSV file
     try:
         with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
+            fieldnames = ['original_row_index', 'conversation_id', 'input', 'expected_output', 'actual_output', 'schema_valid', 'schema_errors', 'tracing_valid', 'tracing_errors', 'bias', 'tracing_similarity', 'content_similarity']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
@@ -2670,7 +2821,7 @@ Examples:
         '--batch-size',
         type=int,
         default=MAX_PARALLEL_PROMPTS,
-        help=f'Maximum number of prompts to process in parallel (default: {MAX_PARALLEL_PROMPTS})'
+        help=f'Maximum number of prompts/conversations to process in parallel. For multi-turn conversations (with input_id), this controls parallel conversations, not individual turns. Turns within each conversation are always processed sequentially in CSV order. (default: {MAX_PARALLEL_PROMPTS})'
     )
     
     parser.add_argument(
