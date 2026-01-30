@@ -2031,7 +2031,7 @@ def fetch_test_run_entries_paginated(test_run_id: str, workspace_id: str, api_ke
     all_entries = []
     page_size = 100
     page_num = 1
-    max_pages = 100  # Safety limit (100 pages * 100 = 10000 entries max)
+    max_pages = 100  # Safety limit on number of pages to prevent excessive requests
     
     url = "https://api.getmaxim.ai/v1/test-runs/entries"
     headers = {"x-maxim-api-key": api_key}
