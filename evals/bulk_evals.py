@@ -3060,7 +3060,6 @@ Examples:
                 )
                 
                 # Also send content similarity evaluation
-                # Also send content similarity evaluation
                 content_similarity_test_run_id = send_content_similarity_to_maxim(
                     test_data=test_data,
                     all_results=all_results
