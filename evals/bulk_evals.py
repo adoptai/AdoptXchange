@@ -652,7 +652,7 @@ def call_local_agent(data, profile, access_token, exclude_fields: List[str] = No
         # Bypass LLM caching by appending a unique request ID
         # This is added as invisible metadata that doesn't change the semantic meaning
         if no_cache:
-            request_id = str(uuid.uuid4())[:8]  # Short unique ID
+            request_id = str(uuid.uuid4())  # Unique ID
             modified_input = f"{modified_input}\n\n[request_id: {request_id}]"
         
         if max_items is not None and max_items > 0:
