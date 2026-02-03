@@ -1634,7 +1634,8 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str],
     print()
     
     # Fetch all Maxim scores and create a lookup by input
-    scores_lookup = {}
+    # Use a list per input_text to handle duplicate prompts in different conversations
+    scores_lookup = {}  # input_text -> list of score dicts
     total_entries_fetched = 0
     duplicate_count = 0
     
@@ -1688,24 +1689,19 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str],
                 if similarity != "no":
                     break
             
-            # Handle duplicates: keep track of all occurrences but use the latest scores
+            # Track duplicates for logging
             if input_text in scores_lookup:
                 duplicate_count += 1
-                # Keep the latest scores (most recent evaluation)
-                # Could also average or keep first, but latest is usually most accurate
             
-            # Initialize if not exists
+            # Initialize list if not exists
             if input_text not in scores_lookup:
-                scores_lookup[input_text] = {
-                    'bias': "no",
-                    'tracing_similarity': "no",
-                    'content_similarity': "no"
-                }
+                scores_lookup[input_text] = []
             
-            # Update scores (merge with existing if duplicate)
-            scores_lookup[input_text].update({
+            # Append this entry's scores to the list (preserves order for duplicate inputs)
+            scores_lookup[input_text].append({
                 'bias': bias,
-                'tracing_similarity': similarity
+                'tracing_similarity': similarity,
+                'content_similarity': "no"
             })
     
     # Fetch content similarity scores if provided
@@ -1747,21 +1743,26 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str],
                     if content_similarity != "no":
                         break
                 
-                # Initialize if not exists
-                if input_text not in scores_lookup:
-                    scores_lookup[input_text] = {
+                # For content similarity, we need to update existing entries
+                # Since content similarity is fetched from a separate test run,
+                # we update each entry in the list for this input
+                if input_text in scores_lookup:
+                    # Update content_similarity for all entries with this input
+                    # (they should all have the same content similarity score since it's the same input text)
+                    for score_entry in scores_lookup[input_text]:
+                        score_entry['content_similarity'] = content_similarity
+                else:
+                    # Initialize list if not exists (shouldn't happen if tracing run was fetched first)
+                    scores_lookup[input_text] = [{
                         'bias': "no",
                         'tracing_similarity': "no",
-                        'content_similarity': "no"
-                    }
-                
-                # Update content similarity
-                scores_lookup[input_text]['content_similarity'] = content_similarity
+                        'content_similarity': content_similarity
+                    }]
     
     print(f"\n  📊 Total entries fetched from Maxim: {total_entries_fetched}")
     print(f"  🔑 Unique inputs in scores lookup: {len(scores_lookup)}")
     if duplicate_count > 0:
-        print(f"  ⚠️  Found {duplicate_count} duplicate inputs (kept latest scores)")
+        print(f"  📋 Found {duplicate_count} duplicate inputs (each occurrence will be matched separately)")
     
     # Helper function to calculate similarity from debug_tracing comparison
     def calculate_similarity_from_tracing(expected_output_str: str, actual_output_str: str) -> str:
@@ -1821,81 +1822,75 @@ def update_csv_with_maxim_scores(raw_csv_filename: str, test_run_ids: List[str],
     unmatched_inputs = []
     similarity_calculated_count = 0
     
+    # Helper to check if expected output has debug_tracing
+    def check_has_expected_tracing(expected_output_str: str) -> bool:
+        try:
+            if isinstance(expected_output_str, str):
+                try:
+                    expected_dict = json.loads(expected_output_str)
+                except (json.JSONDecodeError, ValueError):
+                    try:
+                        expected_dict = ast.literal_eval(expected_output_str)
+                    except (ValueError, SyntaxError):
+                        return False
+            else:
+                expected_dict = expected_output_str
+            
+            expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
+            return expected_tracing is not None
+        except Exception:
+            return False
+    
     with open(raw_csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
             # Normalize input text for matching (strip whitespace)
             input_text = row['input'].strip()
             
-            # Try exact match first
-            if input_text in scores_lookup:
-                row['bias'] = scores_lookup[input_text]['bias']
+            # Try exact match first - pop from the list to handle duplicates
+            if input_text in scores_lookup and scores_lookup[input_text]:
+                # Pop the first score entry for this input (preserves order)
+                scores = scores_lookup[input_text].pop(0)
+                
+                row['bias'] = scores['bias']
+                
                 # Only set tracing_similarity if expected output has debug_tracing
                 expected_output_str = row.get('expected_output', '')
-                has_expected_tracing = False
-                try:
-                    if isinstance(expected_output_str, str):
-                        try:
-                            expected_dict = json.loads(expected_output_str)
-                        except (json.JSONDecodeError, ValueError):
-                            try:
-                                expected_dict = ast.literal_eval(expected_output_str)
-                            except (ValueError, SyntaxError):
-                                expected_dict = {}
-                    else:
-                        expected_dict = expected_output_str
-                    
-                    expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
-                    has_expected_tracing = expected_tracing is not None
-                except Exception:
-                    has_expected_tracing = False
+                has_expected_tracing = check_has_expected_tracing(expected_output_str)
                 
                 if has_expected_tracing:
-                    row['tracing_similarity'] = scores_lookup[input_text]['tracing_similarity']
+                    row['tracing_similarity'] = scores['tracing_similarity']
                 else:
                     # Skip tracing_similarity if expected output has no debug_tracing
                     row['tracing_similarity'] = ""
                 
                 # Always set content_similarity (it always runs)
-                row['content_similarity'] = scores_lookup[input_text].get('content_similarity', '')
+                row['content_similarity'] = scores.get('content_similarity', '')
                 matched_count += 1
             else:
                 # Try to find a fuzzy match (case-insensitive, normalized whitespace)
                 matched = False
                 normalized_input = input_text.lower().strip()
-                for maxim_input in scores_lookup.keys():
+                for maxim_input in list(scores_lookup.keys()):
                     normalized_maxim = maxim_input.lower().strip()
-                    if normalized_input == normalized_maxim:
-                        # Found a case/whitespace variant match
-                        row['bias'] = scores_lookup[maxim_input]['bias']
+                    if normalized_input == normalized_maxim and scores_lookup[maxim_input]:
+                        # Found a case/whitespace variant match - pop from the list
+                        scores = scores_lookup[maxim_input].pop(0)
+                        
+                        row['bias'] = scores['bias']
+                        
                         # Only set tracing_similarity if expected output has debug_tracing
                         expected_output_str = row.get('expected_output', '')
-                        has_expected_tracing = False
-                        try:
-                            if isinstance(expected_output_str, str):
-                                try:
-                                    expected_dict = json.loads(expected_output_str)
-                                except (json.JSONDecodeError, ValueError):
-                                    try:
-                                        expected_dict = ast.literal_eval(expected_output_str)
-                                    except (ValueError, SyntaxError):
-                                        expected_dict = {}
-                            else:
-                                expected_dict = expected_output_str
-                            
-                            expected_tracing = expected_dict.get("debug_tracing") if isinstance(expected_dict, dict) else None
-                            has_expected_tracing = expected_tracing is not None
-                        except Exception:
-                            has_expected_tracing = False
+                        has_expected_tracing = check_has_expected_tracing(expected_output_str)
                         
                         if has_expected_tracing:
-                            row['tracing_similarity'] = scores_lookup[maxim_input]['tracing_similarity']
+                            row['tracing_similarity'] = scores['tracing_similarity']
                         else:
                             # Skip tracing_similarity if expected output has no debug_tracing
                             row['tracing_similarity'] = ""
                         
                         # Always set content_similarity (it always runs)
-                        row['content_similarity'] = scores_lookup[maxim_input].get('content_similarity', '')
+                        row['content_similarity'] = scores.get('content_similarity', '')
                         matched_count += 1
                         matched = True
                         break
@@ -2113,10 +2108,10 @@ def generate_final_csv_from_test_run(
         print(f"Expected Entries: {expected_count}")
     print()
     
-    # Read existing raw CSV to get input -> (conversation_id, original_row_index) mapping 
+    # Read existing raw CSV to get input -> list of (conversation_id, original_row_index) mapping 
     # (we don't send conversation_id/original_row_index to Maxim)
-    conversation_id_lookup = {}
-    original_row_index_lookup = {}
+    # Use lists to handle duplicate prompts in different conversations
+    row_metadata_lookup = {}  # input_text -> list of {conversation_id, original_row_index}
     if os.path.exists(output_filename):
         try:
             with open(output_filename, 'r', newline='', encoding='utf-8') as csvfile:
@@ -2125,12 +2120,15 @@ def generate_final_csv_from_test_run(
                     input_text = row.get('input', '').strip()
                     conv_id = row.get('conversation_id', '')
                     orig_idx = row.get('original_row_index', '0')
-                    if input_text and conv_id:
-                        conversation_id_lookup[input_text] = conv_id
                     if input_text:
-                        original_row_index_lookup[input_text] = orig_idx
-            print(f"📝 Loaded {len(conversation_id_lookup)} conversation_id mappings from existing CSV")
-            print(f"📝 Loaded {len(original_row_index_lookup)} original_row_index mappings from existing CSV")
+                        if input_text not in row_metadata_lookup:
+                            row_metadata_lookup[input_text] = []
+                        row_metadata_lookup[input_text].append({
+                            'conversation_id': conv_id,
+                            'original_row_index': orig_idx
+                        })
+            total_mappings = sum(len(v) for v in row_metadata_lookup.values())
+            print(f"📝 Loaded {total_mappings} row metadata mappings from existing CSV ({len(row_metadata_lookup)} unique inputs)")
         except Exception as e:
             print(f"⚠️  Could not load mappings from existing CSV: {e}")
     
@@ -2252,8 +2250,15 @@ def generate_final_csv_from_test_run(
                 tracing_similarity = ''
             
             # Get conversation_id and original_row_index from lookup (we preserve from raw CSV since Maxim doesn't store them)
-            conversation_id = conversation_id_lookup.get(input_text.strip(), '')
-            original_row_index = original_row_index_lookup.get(input_text.strip(), '0')
+            # Pop from the list to handle duplicate prompts in different conversations
+            input_key = input_text.strip()
+            if input_key in row_metadata_lookup and row_metadata_lookup[input_key]:
+                metadata = row_metadata_lookup[input_key].pop(0)
+                conversation_id = metadata['conversation_id']
+                original_row_index = metadata['original_row_index']
+            else:
+                conversation_id = ''
+                original_row_index = '0'
             
             row = {
                 'original_row_index': original_row_index,
