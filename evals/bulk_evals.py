@@ -3026,9 +3026,9 @@ Examples:
             print(f"  ⏱️  Batch time: {batch_elapsed_time:.2f}s")
             print(f"  Total collected so far: {len(all_results)}")
             
-            # # Sleep 1 second between batches (if more batches to process)
-            # if pending_data:
-            #     time.sleep(1.0)
+            # Sleep 1 second between batches (if more batches to process)
+            if pending_data:
+                time.sleep(1.0)
 
         print(f"\n{'='*50}")
         print(f"ALL BATCHES COMPLETE")
