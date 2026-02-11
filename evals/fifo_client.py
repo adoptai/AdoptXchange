@@ -11,6 +11,17 @@ Usage:
     result = client.wait_for_completion(job_id)
 """
 
+import sys
+import os
+import ast
+from datetime import datetime
+
+# Windows console encoding fix for Unicode output (emojis, progress indicators)
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+
 import httpx
 import time
 import json
@@ -47,6 +58,57 @@ class JobFailedError(FIFOClientError):
         self.error_message = error_message
         self.status_data = status_data or {}
         super().__init__(f"Job {job_id} failed: {error_message}")
+
+
+# Helper functions
+def truncate_string(text: str, max_length: int, suffix: str = "...") -> str:
+    """
+    Truncate a string to max_length characters for user-friendly display.
+
+    Args:
+        text: String to truncate
+        max_length: Maximum length before truncation
+        suffix: Suffix to append when truncated (default: "...")
+
+    Returns:
+        Truncated string with suffix if needed
+    """
+    if not text or len(text) <= max_length:
+        return text
+    return text[:max_length] + suffix
+
+
+def safe_json_parse(json_str: str, fallback: Any = None) -> Any:
+    """
+    Parse JSON string with fallback to ast.literal_eval for malformed JSON.
+
+    This handles cases where the server returns Python dict strings instead of JSON,
+    or where JSON has trailing commas or other minor issues.
+
+    Args:
+        json_str: String to parse
+        fallback: Value to return if all parsing fails (default: None)
+
+    Returns:
+        Parsed object or fallback value
+    """
+    if not json_str:
+        return fallback
+
+    # Try json.loads first (standard)
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Fallback to ast.literal_eval (handles Python dict strings)
+    try:
+        return ast.literal_eval(json_str)
+    except (ValueError, SyntaxError):
+        pass
+
+    # All parsing failed
+    return fallback
 
 
 class FIFOEvalsClient:
@@ -146,6 +208,7 @@ class FIFOEvalsClient:
         row_count = 0
         rows_data = []
         encoding_used = None
+        skipped_rows = []  # Track blank/whitespace-only rows
 
         # Try multiple encodings
         for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']:
@@ -153,8 +216,28 @@ class FIFOEvalsClient:
                 with open(csv_path, 'r', encoding=encoding, errors='replace') as f:
                     reader = csv.DictReader(f)
                     try:
-                        rows_data = list(reader)
+                        # Read all rows and filter blank/whitespace-only rows
+                        raw_rows = list(reader)
                         header = reader.fieldnames
+
+                        # Filter out blank rows and whitespace-only rows
+                        for idx, row in enumerate(raw_rows, start=2):  # Start at 2 (after header)
+                            # Check if row is completely empty or all values are whitespace
+                            is_blank = all(
+                                not value or not str(value).strip()
+                                for value in row.values()
+                            )
+
+                            if is_blank:
+                                skipped_rows.append(idx)
+                            else:
+                                # Strip whitespace from all values
+                                cleaned_row = {
+                                    key: str(value).strip() if value else ''
+                                    for key, value in row.items()
+                                }
+                                rows_data.append(cleaned_row)
+
                         row_count = len(rows_data)
                         encoding_used = encoding
                         break
@@ -204,8 +287,21 @@ class FIFOEvalsClient:
         id_variants = ['input_id', 'conversation_id', 'id']
         id_col = next((header_lower.get(variant) for variant in id_variants if variant in header_lower), None)
 
-        # Analyze ID structure if ID column exists
+        # Report skipped rows
         warnings = []
+        if skipped_rows:
+            if len(skipped_rows) <= 5:
+                skipped_rows_str = ", ".join(str(r) for r in skipped_rows)
+                warnings.append(
+                    f"Skipped {len(skipped_rows)} blank/whitespace-only row(s) at line(s): {skipped_rows_str}"
+                )
+            else:
+                warnings.append(
+                    f"Skipped {len(skipped_rows)} blank/whitespace-only rows "
+                    f"(first 5 at lines: {', '.join(str(r) for r in skipped_rows[:5])}, ...)"
+                )
+
+        # Analyze ID structure if ID column exists
         multi_turn_count = 0
         single_turn_count = 0
         empty_id_count = 0
@@ -248,6 +344,7 @@ class FIFOEvalsClient:
             "encoding": encoding_used,
             "input_column": input_col,
             "id_column": id_col,
+            "skipped_rows": skipped_rows,  # List of line numbers that were skipped
             "conversation_stats": {
                 "multi_turn": multi_turn_count,
                 "single_turn": single_turn_count,
@@ -520,11 +617,21 @@ class FIFOEvalsClient:
             # Check if failed
             if status["status"] == "failed":
                 error_msg = status.get("error", "Unknown error")
+                # Truncate error message for display
+                truncated_error = truncate_string(error_msg, 100)
+                if verbose:
+                    print(f"\n❌ Job failed: {truncated_error}")
                 raise JobFailedError(
                     job_id=job_id,
                     error_message=error_msg,
                     status_data=status
                 )
+
+            # Check if cancelled
+            if status["status"] == "cancelled":
+                if verbose:
+                    print(f"\n⚠️  Job was cancelled")
+                raise FIFOClientError(f"Job {job_id} was cancelled")
 
             # Print progress (only if changed)
             progress = status.get("progress", {})
@@ -533,8 +640,18 @@ class FIFOEvalsClient:
             percent = progress.get("percent_complete", 0.0)
 
             if verbose and completed_convs != last_completed:
+                # Choose emoji based on progress
+                if percent < 25:
+                    emoji = "🔄"
+                elif percent < 50:
+                    emoji = "⏳"
+                elif percent < 75:
+                    emoji = "📊"
+                else:
+                    emoji = "🎯"
+
                 print(
-                    f"Progress: {percent:.1f}% "
+                    f"{emoji} Progress: {percent:.1f}% "
                     f"({completed_convs} of {total_convs} conversations)"
                 )
                 last_completed = completed_convs
@@ -698,6 +815,15 @@ class FIFOEvalsClient:
         Raises:
             ValidationError: If result missing output_csv_url
             FIFOClientError: For download errors
+
+        Note:
+            Future enhancement: For very large result files (>100MB), consider
+            implementing streaming downloads with progress reporting:
+                with client.stream("GET", url) as response:
+                    with open(output_file, 'wb') as f:
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            f.write(chunk)
+                            # Update progress bar here
         """
         # Validate result has URL
         if "output_csv_url" not in result:
@@ -718,9 +844,9 @@ class FIFOEvalsClient:
             output_path = Path(output_file)
             output_path.write_bytes(response.content)
 
-            # Print confirmation
+            # Print confirmation with emoji
             size_kb = len(response.content) / 1024
-            print(f"Downloaded: {output_file} ({size_kb:.1f} KB)")
+            print(f"💾 Downloaded: {output_file} ({size_kb:.1f} KB)")
 
             return str(output_path)
 
@@ -742,7 +868,8 @@ class FIFOEvalsClient:
         output_file: str = "results.csv",
         poll_interval: int = 30,
         verbose: bool = True,
-        skip_validation: bool = False
+        skip_validation: bool = False,
+        auto_timestamp: bool = False
     ) -> str:
         """
         Convenience method: submit, wait, and download in one call.
@@ -754,6 +881,8 @@ class FIFOEvalsClient:
             poll_interval: Status poll interval (default: 30s)
             verbose: Print progress (default: True)
             skip_validation: Skip CSV validation (default: False)
+            auto_timestamp: Auto-generate timestamped filename (default: False)
+                          If True, appends timestamp to output_file basename
 
         Returns:
             Path to downloaded results file
@@ -763,15 +892,25 @@ class FIFOEvalsClient:
             JobFailedError: If job execution fails
             AuthenticationError: If authentication fails
             FIFOClientError: For other errors
+
+        Example with auto_timestamp:
+            >>> # Creates: evaluation_results_20260210_143052.csv
+            >>> client.submit_and_wait(..., auto_timestamp=True)
         """
+        # Apply timestamp if requested
+        if auto_timestamp:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = Path(output_file)
+            output_file = str(output_path.parent / f"{output_path.stem}_{timestamp}{output_path.suffix}")
+
         # Submit job
         if verbose:
-            print(f"Submitting evaluation job: {csv_file}")
+            print(f"📤 Submitting evaluation job: {csv_file}")
 
         job_id = self.submit_evaluation(csv_file, config, skip_validation)
 
         if verbose:
-            print(f"Job submitted: {job_id}\n")
+            print(f"✅ Job submitted: {job_id}\n")
 
         # Wait for completion
         result = self.wait_for_completion(job_id, poll_interval, verbose)
@@ -783,7 +922,7 @@ class FIFOEvalsClient:
         """Context manager support."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         """Close HTTP client on exit."""
         self.client.close()
 
