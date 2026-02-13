@@ -32,7 +32,7 @@ No additional dependencies needed! Uses `httpx` which is already in the project.
 from AdoptXchange.evals import FIFOEvalsClient
 
 # Create client
-client = FIFOEvalsClient(api_key="your_api_key")
+client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
 
 # Submit and wait (simplest)
 result_file = client.submit_and_wait(
@@ -112,7 +112,7 @@ result_file = run_fifo_evaluation(
 ```python
 from AdoptXchange.evals import FIFOEvalsClient
 
-client = FIFOEvalsClient(api_key="your_api_key")
+client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
 
 # 1. Submit job (returns immediately)
 job_id = client.submit_evaluation(
@@ -143,7 +143,7 @@ client.download_results(result, "results.csv")
 ```python
 from AdoptXchange.evals import FIFOEvalsClient
 
-client = FIFOEvalsClient(api_key="your_api_key")
+client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
 
 # List all jobs
 all_jobs = client.list_jobs()
@@ -164,7 +164,7 @@ active = client.list_jobs(status_filter="processing")
 ```python
 from AdoptXchange.evals import FIFOEvalsClient
 
-client = FIFOEvalsClient(api_key="your_api_key")
+client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
 
 # Submit large evaluation (990 prompts = 85 minutes)
 job_id = client.submit_evaluation("large_eval.csv", config={...})
@@ -186,7 +186,7 @@ if status['status'] in ['pending', 'processing']:
 ```python
 from AdoptXchange.evals import FIFOEvalsClient
 
-with FIFOEvalsClient(api_key="your_api_key") as client:
+with FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id") as client:
     result_file = client.submit_and_wait(
         csv_file="test.csv",
         config={...},
@@ -287,7 +287,7 @@ input_id,turn,input,expected_output,actual_output,status,execution_time_ms
 
 ## API Methods
 
-### `FIFOEvalsClient(api_key, base_url="https://api.adopt.ai")`
+### `FIFOEvalsClient(api_key, org_id, base_url="https://api.adopt.ai")`
 
 Initialize client.
 

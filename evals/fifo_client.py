@@ -6,7 +6,7 @@ This client replaces the synchronous bulk_evals.py flow with async job submissio
 Usage:
     from AdoptXchange.evals.fifo_client import FIFOEvalsClient
 
-    client = FIFOEvalsClient(api_key="your_api_key")
+    client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
     job_id = client.submit_evaluation("test.csv", config={...})
     result = client.wait_for_completion(job_id)
 """
@@ -126,6 +126,7 @@ class FIFOEvalsClient:
     def __init__(
         self,
         api_key: str,
+        org_id: str,
         base_url: str = "https://api.adopt.ai",
         timeout: float = 30.0
     ):
@@ -134,6 +135,7 @@ class FIFOEvalsClient:
 
         Args:
             api_key: Bearer token for authentication
+            org_id: Organization ID (required for all API calls)
             base_url: Base URL for adoptai-workflows API
             timeout: HTTP timeout for API calls (not job execution timeout)
 
@@ -143,8 +145,11 @@ class FIFOEvalsClient:
         """
         if not api_key or not api_key.strip():
             raise ValueError("api_key is required and cannot be empty")
+        if not org_id or not org_id.strip():
+            raise ValueError("org_id is required and cannot be empty")
 
         self.api_key = api_key
+        self.org_id = org_id
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.client = httpx.Client(timeout=timeout)
@@ -396,7 +401,7 @@ class FIFOEvalsClient:
                 f"Solution: Refresh your token:\n"
                 f"  from examples.action_api_samples.api_sample import get_auth_token\n"
                 f"  access_token = get_auth_token()\n"
-                f"  client = FIFOEvalsClient(api_key=access_token)"
+                f"  client = FIFOEvalsClient(api_key=access_token, org_id='your_org_id')"
             ) from error
 
         # 404: Not found
@@ -446,7 +451,7 @@ class FIFOEvalsClient:
             FIFOClientError: For other errors
 
         Example:
-            >>> client = FIFOEvalsClient(api_key="...")
+            >>> client = FIFOEvalsClient(api_key="...", org_id="org-123")
             >>> job_id = client.submit_evaluation(
             ...     csv_file="test.csv",
             ...     config={
@@ -488,9 +493,12 @@ class FIFOEvalsClient:
         try:
             with open(csv_path, 'rb') as f:
                 response = self.client.post(
-                    f"{self.base_url}/api/v1/evals/submit",
+                    f"{self.base_url}/api/v2/evals/submit",
                     files={"file": (csv_path.name, f, "text/csv")},
-                    data={"config": json.dumps(config)},
+                    data={
+                        "config": json.dumps(config),
+                        "org_id": self.org_id,
+                    },
                     headers={"Authorization": f"Bearer {self.api_key}"}
                 )
 
@@ -537,7 +545,8 @@ class FIFOEvalsClient:
         """
         try:
             response = self.client.get(
-                f"{self.base_url}/api/v1/evals/status/{job_id}",
+                f"{self.base_url}/api/v2/evals/status/{job_id}",
+                params={"org_id": self.org_id},
                 headers={"Authorization": f"Bearer {self.api_key}"}
             )
 
@@ -676,7 +685,8 @@ class FIFOEvalsClient:
         """
         try:
             response = self.client.get(
-                f"{self.base_url}/api/v1/evals/result/{job_id}",
+                f"{self.base_url}/api/v2/evals/result/{job_id}",
+                params={"org_id": self.org_id},
                 headers={"Authorization": f"Bearer {self.api_key}"}
             )
 
@@ -697,14 +707,16 @@ class FIFOEvalsClient:
 
     def list_jobs(
         self,
-        limit: int = 50,
+        page: int = 1,
+        page_size: int = 20,
         status_filter: str = None
     ) -> List[Dict]:
         """
-        List all evaluation jobs for current user.
+        List all evaluation jobs for current org.
 
         Args:
-            limit: Maximum number of jobs to return (default: 50, max: 100)
+            page: Page number, 1-indexed (default: 1)
+            page_size: Number of jobs per page (default: 20, max: 100)
             status_filter: Filter by status (pending, processing, completed, failed, cancelled)
 
         Returns:
@@ -712,7 +724,7 @@ class FIFOEvalsClient:
 
         Raises:
             AuthenticationError: If authentication fails
-            ValidationError: If limit is invalid
+            ValidationError: If parameters are invalid
             FIFOClientError: For other errors
 
         Example:
@@ -722,12 +734,14 @@ class FIFOEvalsClient:
             >>> # List only completed jobs
             >>> completed = client.list_jobs(status_filter="completed")
             >>>
-            >>> # List recent 20 jobs
-            >>> recent = client.list_jobs(limit=20)
+            >>> # List with pagination
+            >>> page2 = client.list_jobs(page=2, page_size=50)
         """
-        # Validate limit
-        if limit < 1 or limit > 100:
-            raise ValidationError("limit must be between 1 and 100")
+        # Validate parameters
+        if page < 1:
+            raise ValidationError("page must be >= 1")
+        if page_size < 1 or page_size > 100:
+            raise ValidationError("page_size must be between 1 and 100")
 
         # Validate status_filter if provided
         valid_statuses = ["pending", "processing", "completed", "failed", "cancelled"]
@@ -739,12 +753,16 @@ class FIFOEvalsClient:
 
         try:
             # Build query parameters
-            params = {"limit": limit}
+            params = {
+                "org_id": self.org_id,
+                "page": page,
+                "page_size": page_size,
+            }
             if status_filter:
                 params["status"] = status_filter
 
             response = self.client.get(
-                f"{self.base_url}/api/v1/evals/jobs",
+                f"{self.base_url}/api/v2/evals/jobs",
                 params=params,
                 headers={"Authorization": f"Bearer {self.api_key}"}
             )
@@ -784,7 +802,8 @@ class FIFOEvalsClient:
         """
         try:
             response = self.client.delete(
-                f"{self.base_url}/api/v1/evals/jobs/{job_id}",
+                f"{self.base_url}/api/v2/evals/jobs/{job_id}",
+                params={"org_id": self.org_id},
                 headers={"Authorization": f"Bearer {self.api_key}"}
             )
 
@@ -934,6 +953,7 @@ def run_fifo_evaluation(
     base_url: str,
     security_params: Dict,
     api_key: str,
+    org_id: str,
     output_file: str = "results.csv",
     batch_size: int = 5,
     skip_maxim: bool = False,
@@ -948,10 +968,11 @@ def run_fifo_evaluation(
         ...     action_id="action_rallyup_assistant",
         ...     base_url="https://go.rallyup.com",
         ...     security_params={"cookie": "session=..."},
-        ...     api_key="your_api_key"
+        ...     api_key="your_api_key",
+        ...     org_id="your_org_id"
         ... )
     """
-    with FIFOEvalsClient(api_key=api_key) as client:
+    with FIFOEvalsClient(api_key=api_key, org_id=org_id) as client:
         return client.submit_and_wait(
             csv_file=csv_file,
             config={

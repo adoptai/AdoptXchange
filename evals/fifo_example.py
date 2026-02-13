@@ -48,6 +48,7 @@ def example_detailed():
     # Initialize client
     client = FIFOEvalsClient(
         api_key="your_api_key_here",
+        org_id="your_org_id_here",
         base_url="https://api.adopt.ai"
     )
 
@@ -90,7 +91,7 @@ def example_context_manager():
     print("Example 3: Context Manager")
     print("=" * 60)
 
-    with FIFOEvalsClient(api_key="your_api_key_here") as client:
+    with FIFOEvalsClient(api_key="your_api_key_here", org_id="your_org_id_here") as client:
         result_file = client.submit_and_wait(
             csv_file="test_data.csv",
             config={

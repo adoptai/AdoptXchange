@@ -38,11 +38,11 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
     Comprehensive mock FIFO Evals Service API server.
     
     Supports all endpoints and error simulation:
-    - POST /api/v1/evals/submit
-    - GET /api/v1/evals/status/{job_id}
-    - GET /api/v1/evals/result/{job_id}
-    - GET /api/v1/evals/jobs (list)
-    - DELETE /api/v1/evals/jobs/{job_id} (cancel)
+    - POST /api/v2/evals/submit
+    - GET /api/v2/evals/status/{job_id}
+    - GET /api/v2/evals/result/{job_id}
+    - GET /api/v2/evals/jobs (list)
+    - DELETE /api/v2/evals/jobs/{job_id} (cancel)
     """
 
     def log_message(self, format, *args):
@@ -58,7 +58,7 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests (submit endpoint)."""
-        if self.path == '/api/v1/evals/submit':
+        if self.path == '/api/v2/evals/submit':
             # Check authorization
             auth_header = self.headers.get('Authorization')
             if not auth_header or not auth_header.startswith('Bearer '):
@@ -131,7 +131,7 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests (status, result, list endpoints)."""
         # Status endpoint
-        if self.path.startswith('/api/v1/evals/status/'):
+        if self.path.startswith('/api/v2/evals/status/'):
             job_id = self.path.split('/')[-1]
 
             # Check authorization
@@ -189,7 +189,7 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
             })
 
         # Result endpoint
-        elif self.path.startswith('/api/v1/evals/result/'):
+        elif self.path.startswith('/api/v2/evals/result/'):
             job_id = self.path.split('/')[-1]
 
             # Check authorization
@@ -234,7 +234,7 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
             })
 
         # List jobs endpoint
-        elif self.path.startswith('/api/v1/evals/jobs'):
+        elif self.path.startswith('/api/v2/evals/jobs'):
             # Check authorization
             auth_header = self.headers.get('Authorization')
             if not auth_header or not auth_header.startswith('Bearer '):
@@ -273,7 +273,7 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         """Handle DELETE requests (cancel job endpoint)."""
-        if self.path.startswith('/api/v1/evals/jobs/'):
+        if self.path.startswith('/api/v2/evals/jobs/'):
             job_id = self.path.split('/')[-1]
 
             # Check authorization
@@ -374,6 +374,7 @@ def test_get_status(job_id: str):
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -398,6 +399,7 @@ def test_wait_for_completion(job_id: str):
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -421,6 +423,7 @@ def test_list_jobs():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -448,10 +451,10 @@ def test_list_jobs():
         print(f"\n✅ Listed {len(all_jobs)} total jobs")
         assert len(all_jobs) >= 3, "Should have at least 3 jobs"
 
-        # Test 2: List with limit
-        limited = client.list_jobs(limit=2)
-        print(f"✅ Limited to {len(limited)} jobs (requested 2)")
-        assert len(limited) <= 2, "Should respect limit"
+        # Test 2: List with page_size
+        limited = client.list_jobs(page_size=2)
+        print(f"✅ Limited to {len(limited)} jobs (requested page_size=2)")
+        assert len(limited) <= 2, "Should respect page_size"
 
         # Test 3: List by status filter
         pending = client.list_jobs(status_filter="pending")
@@ -479,6 +482,7 @@ def test_cancel_job():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -522,6 +526,7 @@ def test_cancel_completed_job():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -578,6 +583,7 @@ def test_csv_validation_file_not_found():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -690,6 +696,7 @@ def test_column_name_flexibility():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -724,6 +731,7 @@ def test_conversation_structure_detection():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -760,6 +768,7 @@ def test_error_handling_missing_token():
     try:
         client = FIFOEvalsClient(
             api_key="",
+            org_id="test_org",
             base_url=f"http://localhost:{MOCK_SERVER_PORT}"
         )
         print("❌ Should have raised ValueError")
@@ -778,6 +787,7 @@ def test_error_handling_job_not_found():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 
@@ -799,6 +809,7 @@ def test_error_handling_job_failed():
 
     client = FIFOEvalsClient(
         api_key="test_token",
+        org_id="test_org",
         base_url=f"http://localhost:{MOCK_SERVER_PORT}"
     )
 

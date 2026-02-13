@@ -105,6 +105,13 @@ Environment Variables:
     )
 
     parser.add_argument(
+        '--org-id',
+        type=str,
+        default=os.environ.get('ADOPT_ORG_ID'),
+        help='Organization ID (or set ADOPT_ORG_ID env var)'
+    )
+
+    parser.add_argument(
         '--api-base-url',
         type=str,
         default=os.environ.get('ADOPT_API_BASE_URL', 'https://api.adopt.ai'),
@@ -231,10 +238,20 @@ Environment Variables:
             "  python run_fifo_evaluation.py --list-jobs"
         )
 
+    # Validate org_id
+    if not args.org_id:
+        parser.error(
+            "Org ID required. Provide via --org-id or set ADOPT_ORG_ID environment variable.\n\n"
+            "Example:\n"
+            "  export ADOPT_ORG_ID=your_org_id\n"
+            "  python run_fifo_evaluation.py --list-jobs"
+        )
+
     try:
         # Create client
         client = FIFOEvalsClient(
             api_key=args.api_key,
+            org_id=args.org_id,
             base_url=args.api_base_url
         )
 
@@ -245,7 +262,7 @@ Environment Variables:
                 print(f"   Filter: status={args.status}")
             print()
 
-            jobs = client.list_jobs(limit=args.limit, status_filter=args.status)
+            jobs = client.list_jobs(page_size=args.limit, status_filter=args.status)
 
             if not jobs:
                 print("No jobs found.")
