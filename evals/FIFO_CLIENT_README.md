@@ -148,7 +148,7 @@ client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
 # List all jobs
 all_jobs = client.list_jobs()
 for job in all_jobs:
-    print(f"{job['job_id']}: {job['status']} - {job['submitted_at']}")
+    print(f"{job['job_id']}: {job['status']} - {job['created_at']}")
 
 # List only completed jobs
 completed = client.list_jobs(status_filter="completed")
@@ -327,12 +327,22 @@ Get current job status and progress.
 {
     "job_id": "abc-123",
     "status": "processing",  # pending, processing, completed, failed, cancelled
+    "error_message": None,   # Error description if failed
+    "started_at": "2026-02-10T19:00:05Z",
+    "completed_at": None,
     "progress": {
         "total_conversations": 50,
         "completed_conversations": 10,
         "total_turns": 55,
         "completed_turns": 12,
         "percent_complete": 21.8
+    },
+    "metrics": {
+        "successful_conversations": 9,
+        "failed_conversations": 1,
+        "successful_turns": 11,
+        "failed_turns": 1,
+        "average_latency_ms": 1234.5
     }
 }
 ```
@@ -375,15 +385,13 @@ Get job result with download URLs.
 ```python
 {
     "job_id": "abc-123",
+    "org_id": "org-456",
     "status": "completed",
-    "output_csv_url": "https://s3.../output.csv?X-Amz-...",
-    "report_url": "https://s3.../report.json?X-Amz-...",
-    "expires_at": "2026-02-10T15:45:00Z",
-    "summary": {
-        "total_turns": 55,
-        "successful_turns": 53,
-        "failed_turns": 2
-    }
+    "csv_s3_key": "fifo-evals/data/abc-123/output.csv",
+    "json_s3_key": "fifo-evals/data/abc-123/report.json",
+    "csv_download_url": "https://s3.../output.csv?X-Amz-...",
+    "json_download_url": "https://s3.../report.json?X-Amz-...",
+    "message": "Results available for download (URLs expire in 15 minutes)"
 }
 ```
 
@@ -415,9 +423,9 @@ recent = client.list_jobs(limit=20)
 # {
 #   "job_id": "abc-123",
 #   "status": "completed",
-#   "submitted_at": "2026-02-10T19:00:00Z",
-#   "total_conversations": 50,
-#   "total_turns": 55
+#   "created_at": "2026-02-10T19:00:00Z",
+#   "started_at": "2026-02-10T19:00:05Z",
+#   "completed_at": "2026-02-10T20:25:00Z"
 # }
 ```
 
@@ -441,9 +449,10 @@ print(f"Cancelled at: {result['cancelled_at']}")
 # Returns:
 # {
 #   "job_id": "abc-123",
+#   "org_id": "org-456",
 #   "status": "cancelled",
-#   "cancelled_at": "2026-02-10T20:30:00Z",
-#   "progress": {...}
+#   "message": "Eval job cancelled successfully",
+#   "cancelled_at": "2026-02-10T20:30:00Z"
 # }
 ```
 
@@ -456,7 +465,7 @@ print(f"Cancelled at: {result['cancelled_at']}")
 Download result CSV from presigned URL.
 
 **Parameters:**
-- `result` (dict): Result dictionary from `get_result()`
+- `result` (dict): Result dictionary from `get_result()` (must contain `csv_download_url`)
 - `output_file` (str): Local path to save CSV
 
 **Returns:**
@@ -516,8 +525,10 @@ Wait for job to complete before calling `get_result()`:
 status = client.get_status(job_id)
 if status["status"] == "completed":
     result = client.get_result(job_id)
+    client.download_results(result, "results.csv")
 else:
-    print(f"Still processing: {status['progress']['percent_complete']:.1f}%")
+    progress = status["progress"]
+    print(f"Still processing: {progress['percent_complete']:.1f}%")
 ```
 
 ### Error: "CSV file not found"

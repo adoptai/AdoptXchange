@@ -551,32 +551,36 @@ class FIFOEvalsClient:
             )
 
             response.raise_for_status()
-            result = response.json()
+            raw = response.json()
 
-            # Defensive: ensure required fields exist with safe defaults
-            if "status" not in result:
+            # Defensive: ensure required fields exist
+            if "status" not in raw:
                 raise FIFOClientError("Invalid server response: missing 'status' field")
 
-            if "progress" not in result:
-                result["progress"] = {
-                    "total_conversations": 0,
-                    "completed_conversations": 0,
-                    "total_turns": 0,
-                    "completed_turns": 0,
-                    "percent_complete": 0.0
-                }
-
-            # Ensure all progress fields exist
-            progress_defaults = {
-                "total_conversations": 0,
-                "completed_conversations": 0,
-                "total_turns": 0,
-                "completed_turns": 0,
-                "percent_complete": 0.0
+            # Server returns flat EvalJobProgressResponse; reshape into
+            # the nested format the client exposes:
+            #   { "status": "...", "progress": { ... }, "error_message": "...", ... }
+            result = {
+                "job_id": raw.get("job_id", ""),
+                "status": raw["status"],
+                "error_message": raw.get("error_message"),
+                "started_at": raw.get("started_at"),
+                "completed_at": raw.get("completed_at"),
+                "progress": {
+                    "total_conversations": raw.get("total_conversations", 0) or 0,
+                    "completed_conversations": raw.get("completed_conversations", 0) or 0,
+                    "total_turns": raw.get("total_turns", 0) or 0,
+                    "completed_turns": raw.get("completed_turns", 0) or 0,
+                    "percent_complete": raw.get("percent_complete", 0.0) or 0.0,
+                },
+                "metrics": {
+                    "successful_conversations": raw.get("successful_conversations"),
+                    "failed_conversations": raw.get("failed_conversations"),
+                    "successful_turns": raw.get("successful_turns"),
+                    "failed_turns": raw.get("failed_turns"),
+                    "average_latency_ms": raw.get("average_latency_ms"),
+                },
             }
-            for key, default_value in progress_defaults.items():
-                if key not in result["progress"]:
-                    result["progress"][key] = default_value
 
             return result
 
@@ -625,7 +629,7 @@ class FIFOEvalsClient:
 
             # Check if failed
             if status["status"] == "failed":
-                error_msg = status.get("error", "Unknown error")
+                error_msg = status.get("error_message") or "Unknown error"
                 # Truncate error message for display
                 truncated_error = truncate_string(error_msg, 100)
                 if verbose:
@@ -693,11 +697,12 @@ class FIFOEvalsClient:
             response.raise_for_status()
             result = response.json()
 
-            # Validate required fields
-            if "output_csv_url" not in result:
+            # Validate required fields — server returns csv_download_url
+            if "csv_download_url" not in result:
                 raise FIFOClientError(
-                    f"Invalid server response: missing 'output_csv_url'\n"
-                    f"Job may have failed. Check status first."
+                    f"Invalid server response: missing 'csv_download_url'\n"
+                    f"Job status: {result.get('status', 'unknown')}. "
+                    f"Job may not be completed yet. Check status first."
                 )
 
             return result
@@ -844,15 +849,15 @@ class FIFOEvalsClient:
                             f.write(chunk)
                             # Update progress bar here
         """
-        # Validate result has URL
-        if "output_csv_url" not in result:
+        # Validate result has URL — server returns csv_download_url
+        if "csv_download_url" not in result:
             raise ValidationError(
-                "Result missing 'output_csv_url'. "
+                "Result missing 'csv_download_url'. "
                 f"Job status: {result.get('status', 'unknown')}\n"
-                f"Job may have failed. Check status first."
+                f"Job may not be completed yet. Check status first."
             )
 
-        url = result["output_csv_url"]
+        url = result["csv_download_url"]
 
         try:
             # Download using presigned URL (no auth needed)

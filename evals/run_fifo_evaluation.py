@@ -280,8 +280,8 @@ Environment Variables:
 
                 print(f"{status_emoji} {job['job_id']}")
                 print(f"   Status: {job['status']}")
-                print(f"   Submitted: {job.get('submitted_at', 'N/A')}")
-                if 'total_conversations' in job:
+                print(f"   Created: {job.get('created_at', 'N/A')}")
+                if job.get('total_conversations') is not None:
                     print(f"   Conversations: {job['total_conversations']}")
                 print()
 
