@@ -375,11 +375,16 @@ class FIFOEvalsClient:
         status_code = error.response.status_code
 
         # Try to parse error response
+        # FastAPI returns {"detail": "..."}, support both FastAPI and generic formats
         try:
             error_data = error.response.json()
-            error_message = error_data.get('message', str(error))
+            error_message = (
+                error_data.get('detail')
+                or error_data.get('message')
+                or str(error)
+            )
             error_details = error_data.get('details', {})
-        except:
+        except Exception:
             error_message = str(error)
             error_details = {}
 
