@@ -1,14 +1,21 @@
 """
 FIFO Evals Service Client for AdoptXchange
 
-This client replaces the synchronous bulk_evals.py flow with async job submission.
+Submits evaluation jobs to the Adopt.AI backend proxy (api.adopt.ai),
+which forwards them to the adoptai-workflows FIFO engine.
+
+Authentication uses client_id + client_secret, exchanged for a Frontegg JWT
+via POST /v1/users/api-token. Tokens auto-refresh before expiry.
 
 Usage:
     from AdoptXchange.evals.fifo_client import FIFOEvalsClient
 
-    client = FIFOEvalsClient(api_key="your_api_key", org_id="your_org_id")
+    client = FIFOEvalsClient(client_id="your_id", client_secret="your_secret")
     job_id = client.submit_evaluation("test.csv", config={...})
     result = client.wait_for_completion(job_id)
+
+    # Or with environment variables (ADOPT_CLIENT_ID, ADOPT_CLIENT_SECRET):
+    client = FIFOEvalsClient.from_env()
 """
 
 import sys
@@ -113,9 +120,13 @@ def safe_json_parse(json_str: str, fallback: Any = None) -> Any:
 
 class FIFOEvalsClient:
     """
-    Client for FIFO Evals Service with validation and error handling.
+    Client for FIFO Evals Service via the Adopt.AI backend proxy.
 
-    Provides async job submission with progress tracking for large-scale evaluations.
+    Authenticates with client_id + client_secret (Frontegg API credentials),
+    then submits evaluation jobs with progress tracking.
+
+    The backend proxy extracts org_id from the JWT — the client never
+    sends it explicitly.
     """
 
     # Validation constants
@@ -123,36 +134,141 @@ class FIFOEvalsClient:
     MAX_CSV_ROWS = 10000
     REQUIRED_COLUMNS = ['input', 'prompt', 'user_message']  # At least one required
 
+    # Refresh token 5 minutes before expiry
+    _TOKEN_REFRESH_BUFFER_SECS = 300
+
     def __init__(
         self,
-        api_key: str,
-        org_id: str,
+        client_id: str = None,
+        client_secret: str = None,
+        *,
+        access_token: str = None,
         base_url: str = "https://api.adopt.ai",
         timeout: float = 30.0
     ):
         """
         Initialize FIFO Evals client.
 
+        Provide either client_id + client_secret (recommended) for automatic
+        token management, or a pre-obtained access_token for testing.
+
         Args:
-            api_key: Bearer token for authentication
-            org_id: Organization ID (required for all API calls)
-            base_url: Base URL for adoptai-workflows API
+            client_id: Frontegg API client ID
+            client_secret: Frontegg API client secret
+            access_token: Pre-obtained JWT (bypasses token exchange, no auto-refresh)
+            base_url: Backend proxy URL (default: https://api.adopt.ai)
             timeout: HTTP timeout for API calls (not job execution timeout)
-
-        Note:
-            Access tokens expire after 1 hour. For long-running operations,
-            refresh your token periodically using get_auth_token().
         """
-        if not api_key or not api_key.strip():
-            raise ValueError("api_key is required and cannot be empty")
-        if not org_id or not org_id.strip():
-            raise ValueError("org_id is required and cannot be empty")
+        if access_token:
+            # Pre-obtained token mode (no auto-refresh)
+            self._client_id = None
+            self._client_secret = None
+            self._access_token = access_token
+            self._token_expires_at = None  # Unknown expiry, no refresh
+        elif client_id and client_secret:
+            # Credential mode (auto token exchange + refresh)
+            self._client_id = client_id
+            self._client_secret = client_secret
+            self._access_token = None
+            self._token_expires_at = 0  # Force immediate auth on first call
+        else:
+            raise ValueError(
+                "Provide either (client_id + client_secret) or access_token.\n\n"
+                "Example:\n"
+                "  client = FIFOEvalsClient(client_id='...', client_secret='...')\n"
+                "  # or\n"
+                "  client = FIFOEvalsClient(access_token='pre-obtained-jwt')"
+            )
 
-        self.api_key = api_key
-        self.org_id = org_id
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.client = httpx.Client(timeout=timeout)
+
+    @classmethod
+    def from_env(cls, base_url: str = "https://api.adopt.ai", **kwargs) -> "FIFOEvalsClient":
+        """
+        Create client from environment variables.
+
+        Reads ADOPT_CLIENT_ID and ADOPT_CLIENT_SECRET from environment
+        (or .env file via dotenv).
+
+        Args:
+            base_url: Backend proxy URL override
+            **kwargs: Additional arguments passed to constructor
+        """
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+
+        client_id = os.environ.get("ADOPT_CLIENT_ID")
+        client_secret = os.environ.get("ADOPT_CLIENT_SECRET")
+
+        if not client_id or not client_secret:
+            raise ValueError(
+                "ADOPT_CLIENT_ID and ADOPT_CLIENT_SECRET environment variables are required.\n"
+                "Set them in your environment or in a .env file."
+            )
+
+        return cls(client_id=client_id, client_secret=client_secret, base_url=base_url, **kwargs)
+
+    def _authenticate(self):
+        """
+        Exchange client_id + client_secret for a JWT via the backend token endpoint.
+
+        Raises:
+            AuthenticationError: If token exchange fails
+        """
+        try:
+            response = self.client.post(
+                f"{self.base_url}/v1/users/api-token",
+                json={"client_id": self._client_id, "secret": self._client_secret},
+            )
+
+            if response.status_code == 401:
+                raise AuthenticationError(
+                    "Invalid client credentials.\n"
+                    "Check your ADOPT_CLIENT_ID and ADOPT_CLIENT_SECRET."
+                )
+
+            response.raise_for_status()
+            data = response.json()
+
+            self._access_token = data["access_token"]
+            # expires_in is seconds from now; store absolute expiry time
+            expires_in = data.get("expires_in", 3600)
+            self._token_expires_at = time.time() + expires_in
+
+        except AuthenticationError:
+            raise
+        except httpx.HTTPStatusError as e:
+            raise AuthenticationError(
+                f"Token exchange failed: HTTP {e.response.status_code}\n"
+                f"Response: {e.response.text}"
+            ) from e
+        except httpx.ConnectError as e:
+            raise FIFOClientError(
+                f"Cannot connect to {self.base_url} for authentication.\n"
+                f"Check that the URL is correct and the service is running."
+            ) from e
+
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """
+        Get authorization headers, refreshing the token if needed.
+
+        Returns:
+            Dict with Authorization header
+        """
+        if self._client_id and self._client_secret:
+            # Auto-refresh if token is missing or about to expire
+            if (
+                self._access_token is None
+                or (self._token_expires_at and time.time() > self._token_expires_at - self._TOKEN_REFRESH_BUFFER_SECS)
+            ):
+                self._authenticate()
+
+        return {"Authorization": f"Bearer {self._access_token}"}
 
     def _validate_csv_file(self, csv_file: str) -> Dict[str, Any]:
         """
@@ -400,13 +516,12 @@ class FIFOEvalsClient:
             raise AuthenticationError(
                 f"Authentication failed: {error_message}\n\n"
                 f"Possible causes:\n"
-                f"  1. Invalid API key\n"
+                f"  1. Invalid client credentials\n"
                 f"  2. Expired token (tokens expire after 1 hour)\n"
                 f"  3. Missing Authorization header\n\n"
-                f"Solution: Refresh your token:\n"
-                f"  from examples.action_api_samples.api_sample import get_auth_token\n"
-                f"  access_token = get_auth_token()\n"
-                f"  client = FIFOEvalsClient(api_key=access_token, org_id='your_org_id')"
+                f"Solution: Check your ADOPT_CLIENT_ID and ADOPT_CLIENT_SECRET,\n"
+                f"or create a new client:\n"
+                f"  client = FIFOEvalsClient(client_id='...', client_secret='...')"
             ) from error
 
         # 404: Not found
@@ -456,7 +571,7 @@ class FIFOEvalsClient:
             FIFOClientError: For other errors
 
         Example:
-            >>> client = FIFOEvalsClient(api_key="...", org_id="org-123")
+            >>> client = FIFOEvalsClient(client_id="...", client_secret="...")
             >>> job_id = client.submit_evaluation(
             ...     csv_file="test.csv",
             ...     config={
@@ -473,9 +588,9 @@ class FIFOEvalsClient:
 
             # Display validation warnings if any
             if validation_info.get("warnings"):
-                print("\n⚠️  CSV Validation Warnings:")
+                print("\n  CSV Validation Warnings:")
                 for warning in validation_info["warnings"]:
-                    print(f"   • {warning}")
+                    print(f"   - {warning}")
                 print()
 
             # Display conversation stats
@@ -484,12 +599,12 @@ class FIFOEvalsClient:
                 total_convs = stats.get("total_conversations", 0)
                 multi = stats.get("multi_turn", 0)
                 single = stats.get("single_turn", 0)
-                print(f"📊 CSV Analysis:")
-                print(f"   • {validation_info['row_count']} total rows")
-                print(f"   • {total_convs} conversations ({multi} multi-turn, {single} single-turn)")
-                print(f"   • Input column: '{validation_info['input_column']}'")
+                print(f"CSV Analysis:")
+                print(f"   - {validation_info['row_count']} total rows")
+                print(f"   - {total_convs} conversations ({multi} multi-turn, {single} single-turn)")
+                print(f"   - Input column: '{validation_info['input_column']}'")
                 if validation_info.get('id_column'):
-                    print(f"   • ID column: '{validation_info['id_column']}'")
+                    print(f"   - ID column: '{validation_info['id_column']}'")
                 print()
         else:
             csv_path = Path(csv_file).resolve()
@@ -498,13 +613,10 @@ class FIFOEvalsClient:
         try:
             with open(csv_path, 'rb') as f:
                 response = self.client.post(
-                    f"{self.base_url}/api/v2/evals/submit",
+                    f"{self.base_url}/v2/evals/submit",
                     files={"file": (csv_path.name, f, "text/csv")},
-                    data={
-                        "config": json.dumps(config),
-                        "org_id": self.org_id,
-                    },
-                    headers={"Authorization": f"Bearer {self.api_key}"}
+                    data={"config": json.dumps(config)},
+                    headers=self._get_auth_headers(),
                 )
 
             response.raise_for_status()
@@ -550,9 +662,8 @@ class FIFOEvalsClient:
         """
         try:
             response = self.client.get(
-                f"{self.base_url}/api/v2/evals/status/{job_id}",
-                params={"org_id": self.org_id},
-                headers={"Authorization": f"Bearer {self.api_key}"}
+                f"{self.base_url}/v2/evals/{job_id}/status",
+                headers=self._get_auth_headers(),
             )
 
             response.raise_for_status()
@@ -629,7 +740,7 @@ class FIFOEvalsClient:
             if status["status"] == "completed":
                 elapsed = time.time() - start_time
                 if verbose:
-                    print(f"\n✅ Job completed in {elapsed / 60:.1f} minutes")
+                    print(f"\nJob completed in {elapsed / 60:.1f} minutes")
                 return self.get_result(job_id)
 
             # Check if failed
@@ -638,7 +749,7 @@ class FIFOEvalsClient:
                 # Truncate error message for display
                 truncated_error = truncate_string(error_msg, 100)
                 if verbose:
-                    print(f"\n❌ Job failed: {truncated_error}")
+                    print(f"\nJob failed: {truncated_error}")
                 raise JobFailedError(
                     job_id=job_id,
                     error_message=error_msg,
@@ -648,7 +759,7 @@ class FIFOEvalsClient:
             # Check if cancelled
             if status["status"] == "cancelled":
                 if verbose:
-                    print(f"\n⚠️  Job was cancelled")
+                    print(f"\nJob was cancelled")
                 raise FIFOClientError(f"Job {job_id} was cancelled")
 
             # Print progress (only if changed)
@@ -658,18 +769,8 @@ class FIFOEvalsClient:
             percent = progress.get("percent_complete", 0.0)
 
             if verbose and completed_convs != last_completed:
-                # Choose emoji based on progress
-                if percent < 25:
-                    emoji = "🔄"
-                elif percent < 50:
-                    emoji = "⏳"
-                elif percent < 75:
-                    emoji = "📊"
-                else:
-                    emoji = "🎯"
-
                 print(
-                    f"{emoji} Progress: {percent:.1f}% "
+                    f"Progress: {percent:.1f}% "
                     f"({completed_convs} of {total_convs} conversations)"
                 )
                 last_completed = completed_convs
@@ -685,7 +786,7 @@ class FIFOEvalsClient:
             job_id: Job identifier
 
         Returns:
-            Result dictionary with output_csv_url and report_url
+            Result dictionary with csv_download_url and report_url
 
         Raises:
             JobNotFoundError: If job not found or not ready
@@ -694,15 +795,14 @@ class FIFOEvalsClient:
         """
         try:
             response = self.client.get(
-                f"{self.base_url}/api/v2/evals/result/{job_id}",
-                params={"org_id": self.org_id},
-                headers={"Authorization": f"Bearer {self.api_key}"}
+                f"{self.base_url}/v2/evals/{job_id}/results",
+                headers=self._get_auth_headers(),
             )
 
             response.raise_for_status()
             result = response.json()
 
-            # Validate required fields — server returns csv_download_url
+            # Validate required fields -- server returns csv_download_url
             if "csv_download_url" not in result:
                 raise FIFOClientError(
                     f"Invalid server response: missing 'csv_download_url'\n"
@@ -762,9 +862,8 @@ class FIFOEvalsClient:
             )
 
         try:
-            # Build query parameters
+            # Build query parameters (no org_id -- proxy extracts from JWT)
             params = {
-                "org_id": self.org_id,
                 "page": page,
                 "page_size": page_size,
             }
@@ -772,9 +871,9 @@ class FIFOEvalsClient:
                 params["status"] = status_filter
 
             response = self.client.get(
-                f"{self.base_url}/api/v2/evals/jobs",
+                f"{self.base_url}/v2/evals/jobs",
                 params=params,
-                headers={"Authorization": f"Bearer {self.api_key}"}
+                headers=self._get_auth_headers(),
             )
 
             response.raise_for_status()
@@ -811,10 +910,9 @@ class FIFOEvalsClient:
             >>> print(f"Cancelled at: {result['cancelled_at']}")
         """
         try:
-            response = self.client.delete(
-                f"{self.base_url}/api/v2/evals/jobs/{job_id}",
-                params={"org_id": self.org_id},
-                headers={"Authorization": f"Bearer {self.api_key}"}
+            response = self.client.post(
+                f"{self.base_url}/v2/evals/{job_id}/cancel",
+                headers=self._get_auth_headers(),
             )
 
             response.raise_for_status()
@@ -842,19 +940,10 @@ class FIFOEvalsClient:
             Path to downloaded file
 
         Raises:
-            ValidationError: If result missing output_csv_url
+            ValidationError: If result missing csv_download_url
             FIFOClientError: For download errors
-
-        Note:
-            Future enhancement: For very large result files (>100MB), consider
-            implementing streaming downloads with progress reporting:
-                with client.stream("GET", url) as response:
-                    with open(output_file, 'wb') as f:
-                        for chunk in response.iter_bytes(chunk_size=8192):
-                            f.write(chunk)
-                            # Update progress bar here
         """
-        # Validate result has URL — server returns csv_download_url
+        # Validate result has URL -- server returns csv_download_url
         if "csv_download_url" not in result:
             raise ValidationError(
                 "Result missing 'csv_download_url'. "
@@ -873,9 +962,9 @@ class FIFOEvalsClient:
             output_path = Path(output_file)
             output_path.write_bytes(response.content)
 
-            # Print confirmation with emoji
+            # Print confirmation
             size_kb = len(response.content) / 1024
-            print(f"💾 Downloaded: {output_file} ({size_kb:.1f} KB)")
+            print(f"Downloaded: {output_file} ({size_kb:.1f} KB)")
 
             return str(output_path)
 
@@ -911,7 +1000,6 @@ class FIFOEvalsClient:
             verbose: Print progress (default: True)
             skip_validation: Skip CSV validation (default: False)
             auto_timestamp: Auto-generate timestamped filename (default: False)
-                          If True, appends timestamp to output_file basename
 
         Returns:
             Path to downloaded results file
@@ -921,10 +1009,6 @@ class FIFOEvalsClient:
             JobFailedError: If job execution fails
             AuthenticationError: If authentication fails
             FIFOClientError: For other errors
-
-        Example with auto_timestamp:
-            >>> # Creates: evaluation_results_20260210_143052.csv
-            >>> client.submit_and_wait(..., auto_timestamp=True)
         """
         # Apply timestamp if requested
         if auto_timestamp:
@@ -934,12 +1018,12 @@ class FIFOEvalsClient:
 
         # Submit job
         if verbose:
-            print(f"📤 Submitting evaluation job: {csv_file}")
+            print(f"Submitting evaluation job: {csv_file}")
 
         job_id = self.submit_evaluation(csv_file, config, skip_validation)
 
         if verbose:
-            print(f"✅ Job submitted: {job_id}\n")
+            print(f"Job submitted: {job_id}\n")
 
         # Wait for completion
         result = self.wait_for_completion(job_id, poll_interval, verbose)
@@ -962,8 +1046,8 @@ def run_fifo_evaluation(
     action_id: str,
     base_url: str,
     security_params: Dict,
-    api_key: str,
-    org_id: str,
+    client_id: str,
+    client_secret: str,
     output_file: str = "results.csv",
     batch_size: int = 5,
     skip_maxim: bool = False,
@@ -978,11 +1062,11 @@ def run_fifo_evaluation(
         ...     action_id="action_rallyup_assistant",
         ...     base_url="https://go.rallyup.com",
         ...     security_params={"cookie": "session=..."},
-        ...     api_key="your_api_key",
-        ...     org_id="your_org_id"
+        ...     client_id="your_client_id",
+        ...     client_secret="your_client_secret"
         ... )
     """
-    with FIFOEvalsClient(api_key=api_key, org_id=org_id) as client:
+    with FIFOEvalsClient(client_id=client_id, client_secret=client_secret) as client:
         return client.submit_and_wait(
             csv_file=csv_file,
             config={

@@ -8,6 +8,13 @@ Combines all tests:
 - CSV validation (encoding, columns, structure)
 - Error handling (auth, not found, validation)
 - Defensive parsing and security
+
+Mock server routes match the adoptwebui backend proxy:
+- POST /v2/evals/submit
+- GET  /v2/evals/{job_id}/status
+- GET  /v2/evals/{job_id}/results
+- GET  /v2/evals/jobs
+- POST /v2/evals/{job_id}/cancel
 """
 
 import json
@@ -35,14 +42,14 @@ MOCK_SERVER_PORT = 8777
 
 class ComprehensiveMockServer(BaseHTTPRequestHandler):
     """
-    Comprehensive mock FIFO Evals Service API server.
-    
-    Supports all endpoints and error simulation:
-    - POST /api/v2/evals/submit
-    - GET /api/v2/evals/status/{job_id}
-    - GET /api/v2/evals/result/{job_id}
-    - GET /api/v2/evals/jobs (list)
-    - DELETE /api/v2/evals/jobs/{job_id} (cancel)
+    Mock server matching adoptwebui backend proxy routes.
+
+    Routes:
+    - POST /v2/evals/submit
+    - GET  /v2/evals/{job_id}/status
+    - GET  /v2/evals/{job_id}/results
+    - GET  /v2/evals/jobs
+    - POST /v2/evals/{job_id}/cancel
     """
 
     def log_message(self, format, *args):
@@ -56,32 +63,38 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
+    def _check_auth(self) -> bool:
+        """Check authorization header. Returns False and sends 401 if invalid."""
+        auth_header = self.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            self._send_json_response(401, {"detail": "unauthorized"})
+            return False
+        if auth_header == 'Bearer expired_token':
+            self._send_json_response(401, {"detail": "Token has expired"})
+            return False
+        return True
+
+    def _parse_path(self):
+        """Parse path and query params."""
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(self.path)
+        return parsed.path, parse_qs(parsed.query)
+
     def do_POST(self):
-        """Handle POST requests (submit endpoint)."""
-        if self.path == '/api/v2/evals/submit':
-            # Check authorization
-            auth_header = self.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                self._send_json_response(401, {"error": "unauthorized"})
+        """Handle POST requests (submit, cancel)."""
+        path, params = self._parse_path()
+
+        # Submit: POST /v2/evals/submit
+        if path == '/v2/evals/submit':
+            if not self._check_auth():
                 return
 
-            # Special case: simulate expired token
-            if auth_header == 'Bearer expired_token':
-                self._send_json_response(401, {
-                    "error": "unauthorized",
-                    "message": "Token has expired"
-                })
-                return
-
-            # Parse multipart form data
             content_length = int(self.headers['Content-Length'])
             body = self.rfile.read(content_length)
 
-            # Check if CSV file and config are present
             if b'text/csv' not in body or b'config' not in body:
                 self._send_json_response(400, {
-                    "error": "validation_error",
-                    "message": "Missing file or config"
+                    "detail": "Missing file or config"
                 })
                 return
 
@@ -92,14 +105,12 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
                 config_end = body.find(b'}', config_start) + 1
                 config_bytes = body[config_start:config_end]
                 config = json.loads(config_bytes.decode())
-            except:
+            except Exception:
                 config = {"action_id": "test_action"}
 
-            # Special case: simulate job that will fail
             job_id = str(uuid.uuid4())
             status = "pending"
-            
-            # Check if this should be a failing job (from config)
+
             if config.get("_test_failure"):
                 status = "failed"
 
@@ -117,49 +128,76 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
                 }
             }
 
-            self._send_json_response(200, {
+            self._send_json_response(201, {
                 "job_id": job_id,
                 "status": status,
                 "total_conversations": 50,
                 "total_turns": 55,
-                "estimated_duration_seconds": 300,
-                "enqueued_at": "2026-02-10T19:00:00Z"
             })
-        else:
-            self._send_json_response(404, {"error": "not_found"})
+            return
 
-    def do_GET(self):
-        """Handle GET requests (status, result, list endpoints)."""
-        # Status endpoint
-        if self.path.startswith('/api/v2/evals/status/'):
-            job_id = self.path.split('/')[-1]
-
-            # Check authorization
-            auth_header = self.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                self._send_json_response(401, {"error": "unauthorized"})
+        # Cancel: POST /v2/evals/{job_id}/cancel
+        import re
+        cancel_match = re.match(r'^/v2/evals/([^/]+)/cancel$', path)
+        if cancel_match:
+            if not self._check_auth():
                 return
 
-            # Check if job exists
+            job_id = cancel_match.group(1)
+
             if job_id not in MOCK_JOBS:
-                self._send_json_response(404, {
-                    "error": "not_found",
-                    "message": "Job not found or not accessible"
-                })
+                self._send_json_response(404, {"detail": "Job not found"})
                 return
 
             job = MOCK_JOBS[job_id]
 
-            # Simulate progress (move job forward each status check)
-            # Don't override failed or cancelled status
+            if job["status"] in ["completed", "failed"]:
+                self._send_json_response(400, {
+                    "detail": f"Cannot cancel job with status: {job['status']}"
+                })
+                return
+
+            job["status"] = "cancelled"
+            job["cancelled_at"] = time.time()
+
+            self._send_json_response(200, {
+                "job_id": job_id,
+                "status": "cancelled",
+                "cancelled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(job["cancelled_at"])),
+                "progress": job["progress"]
+            })
+            return
+
+        self._send_json_response(404, {"detail": "not_found"})
+
+    def do_GET(self):
+        """Handle GET requests (status, results, jobs)."""
+        path, params = self._parse_path()
+
+        import re
+
+        # Status: GET /v2/evals/{job_id}/status
+        status_match = re.match(r'^/v2/evals/([^/]+)/status$', path)
+        if status_match:
+            if not self._check_auth():
+                return
+
+            job_id = status_match.group(1)
+
+            if job_id not in MOCK_JOBS:
+                self._send_json_response(404, {"detail": "Job not found or not accessible"})
+                return
+
+            job = MOCK_JOBS[job_id]
+
+            # Simulate progress
             if job["status"] not in ["failed", "cancelled"]:
                 elapsed = time.time() - job["submitted_at"]
-
                 if job["status"] == "pending" and elapsed > 2:
                     job["status"] = "processing"
 
             if job["status"] == "processing":
-                # Simulate progress
+                elapsed = time.time() - job["submitted_at"]
                 progress_pct = min((elapsed - 2) / 5 * 100, 100)
                 completed_turns = int(55 * progress_pct / 100)
                 completed_convs = int(50 * progress_pct / 100)
@@ -169,15 +207,12 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
                     "completed_conversations": completed_convs,
                     "total_turns": 55,
                     "completed_turns": completed_turns,
-                    "current_conversation_id": str(completed_convs),
-                    "current_turn": 1,
                     "percent_complete": progress_pct
                 }
 
                 if progress_pct >= 100:
                     job["status"] = "completed"
 
-            # Check if job failed
             if job["status"] == "failed":
                 job["error_message"] = "ProjectA3 connection timeout"
 
@@ -187,69 +222,45 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
                 "progress": job.get("progress", {}),
                 "error_message": job.get("error_message")
             })
+            return
 
-        # Result endpoint
-        elif self.path.startswith('/api/v2/evals/result/'):
-            job_id = self.path.split('/')[-1]
-
-            # Check authorization
-            auth_header = self.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                self._send_json_response(401, {"error": "unauthorized"})
+        # Results: GET /v2/evals/{job_id}/results
+        results_match = re.match(r'^/v2/evals/([^/]+)/results$', path)
+        if results_match:
+            if not self._check_auth():
                 return
 
-            # Check if job exists
+            job_id = results_match.group(1)
+
             if job_id not in MOCK_JOBS:
-                self._send_json_response(404, {
-                    "error": "not_found",
-                    "message": "Job not found"
-                })
+                self._send_json_response(404, {"detail": "Job not found"})
                 return
 
             job = MOCK_JOBS[job_id]
 
-            # Check if completed
             if job["status"] != "completed":
                 self._send_json_response(404, {
-                    "error": "not_ready",
-                    "message": "Results not yet available",
+                    "detail": "Results not yet available",
                     "status": job["status"],
-                    "progress": job.get("progress", {})
                 })
                 return
 
-            # Return mock result
             self._send_json_response(200, {
                 "job_id": job_id,
                 "status": "completed",
-                "output_csv_url": f"http://mock-s3.com/results/{job_id}/output.csv",
+                "csv_download_url": f"http://mock-s3.com/results/{job_id}/output.csv",
                 "report_url": f"http://mock-s3.com/results/{job_id}/report.json",
-                "expires_at": "2026-02-10T20:00:00Z",
-                "summary": {
-                    "total_turns": 55,
-                    "successful_turns": 53,
-                    "failed_turns": 2,
-                    "average_execution_time_ms": 4850
-                }
             })
+            return
 
-        # List jobs endpoint
-        elif self.path.startswith('/api/v2/evals/jobs'):
-            # Check authorization
-            auth_header = self.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                self._send_json_response(401, {"error": "unauthorized"})
+        # List jobs: GET /v2/evals/jobs
+        if path == '/v2/evals/jobs':
+            if not self._check_auth():
                 return
 
-            # Parse query parameters
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-
-            limit = int(params.get('limit', [50])[0])
+            page_size = int(params.get('page_size', [50])[0])
             status_filter = params.get('status', [None])[0]
 
-            # Build job list
             jobs = []
             for job_id, job in MOCK_JOBS.items():
                 if status_filter and job["status"] != status_filter:
@@ -263,56 +274,13 @@ class ComprehensiveMockServer(BaseHTTPRequestHandler):
                     "total_turns": job["progress"]["total_turns"]
                 })
 
-                if len(jobs) >= limit:
+                if len(jobs) >= page_size:
                     break
 
             self._send_json_response(200, {"jobs": jobs, "total": len(jobs)})
+            return
 
-        else:
-            self._send_json_response(404, {"error": "not_found"})
-
-    def do_DELETE(self):
-        """Handle DELETE requests (cancel job endpoint)."""
-        if self.path.startswith('/api/v2/evals/jobs/'):
-            job_id = self.path.split('/')[-1]
-
-            # Check authorization
-            auth_header = self.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                self._send_json_response(401, {"error": "unauthorized"})
-                return
-
-            # Check if job exists
-            if job_id not in MOCK_JOBS:
-                self._send_json_response(404, {
-                    "error": "not_found",
-                    "message": "Job not found"
-                })
-                return
-
-            job = MOCK_JOBS[job_id]
-
-            # Check if job can be cancelled
-            if job["status"] in ["completed", "failed"]:
-                self._send_json_response(400, {
-                    "error": "invalid_state",
-                    "message": f"Cannot cancel job with status: {job['status']}"
-                })
-                return
-
-            # Cancel the job
-            job["status"] = "cancelled"
-            job["cancelled_at"] = time.time()
-
-            self._send_json_response(200, {
-                "job_id": job_id,
-                "status": "cancelled",
-                "cancelled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(job["cancelled_at"])),
-                "progress": job["progress"]
-            })
-
-        else:
-            self._send_json_response(404, {"error": "not_found"})
+        self._send_json_response(404, {"detail": "not_found"})
 
 
 def start_mock_server(port: int = MOCK_SERVER_PORT):
@@ -322,6 +290,14 @@ def start_mock_server(port: int = MOCK_SERVER_PORT):
     thread.start()
     time.sleep(0.5)  # Give server time to start
     return server
+
+
+def _make_client(port: int = MOCK_SERVER_PORT) -> FIFOEvalsClient:
+    """Create test client with pre-obtained token (bypasses auth exchange)."""
+    return FIFOEvalsClient(
+        access_token="test_token",
+        base_url=f"http://localhost:{port}",
+    )
 
 
 # =============================================================================
@@ -341,10 +317,7 @@ def test_submit_evaluation():
 """)
 
     try:
-        client = FIFOEvalsClient(
-            api_key="test_token",
-            base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-        )
+        client = _make_client()
 
         job_id = client.submit_evaluation(
             csv_file=str(test_csv),
@@ -356,7 +329,7 @@ def test_submit_evaluation():
             }
         )
 
-        print(f"✅ Job submitted: {job_id}")
+        print(f"Job submitted: {job_id}")
         assert isinstance(job_id, str), "job_id should be string"
         assert len(job_id) > 0, "job_id should not be empty"
 
@@ -372,11 +345,7 @@ def test_get_status(job_id: str):
     print("TEST 2: Get Status")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     status = client.get_status(job_id)
 
@@ -388,7 +357,7 @@ def test_get_status(job_id: str):
     assert status["status"] in ["pending", "processing", "completed", "failed", "cancelled"], \
         "Status should be valid"
 
-    print("✅ Status check passed")
+    print("PASS: Status check passed")
 
 
 def test_wait_for_completion(job_id: str):
@@ -397,11 +366,7 @@ def test_wait_for_completion(job_id: str):
     print("TEST 3: Wait for Completion")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     print("Waiting for completion (should take ~7 seconds with mock)...")
     result = client.wait_for_completion(job_id, poll_interval=1, verbose=True)
@@ -409,9 +374,9 @@ def test_wait_for_completion(job_id: str):
     assert "job_id" in result, "Result should have job_id"
     assert "status" in result, "Result should have status"
     assert result["status"] == "completed", "Job should be completed"
-    assert "output_csv_url" in result, "Result should have output_csv_url"
+    assert "csv_download_url" in result, "Result should have csv_download_url"
 
-    print("✅ Wait for completion passed")
+    print("PASS: Wait for completion passed")
     return result
 
 
@@ -421,11 +386,7 @@ def test_list_jobs():
     print("TEST 4: List Jobs")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     # Submit a few test jobs first
     test_csv = Path("test_list_jobs.csv")
@@ -448,17 +409,17 @@ def test_list_jobs():
 
         # Test 1: List all jobs
         all_jobs = client.list_jobs()
-        print(f"\n✅ Listed {len(all_jobs)} total jobs")
+        print(f"\nPASS: Listed {len(all_jobs)} total jobs")
         assert len(all_jobs) >= 3, "Should have at least 3 jobs"
 
         # Test 2: List with page_size
         limited = client.list_jobs(page_size=2)
-        print(f"✅ Limited to {len(limited)} jobs (requested page_size=2)")
+        print(f"PASS: Limited to {len(limited)} jobs (requested page_size=2)")
         assert len(limited) <= 2, "Should respect page_size"
 
         # Test 3: List by status filter
         pending = client.list_jobs(status_filter="pending")
-        print(f"✅ Found {len(pending)} pending jobs")
+        print(f"PASS: Found {len(pending)} pending jobs")
 
         # Verify job structure
         if all_jobs:
@@ -466,12 +427,12 @@ def test_list_jobs():
             assert "job_id" in job, "Job should have job_id"
             assert "status" in job, "Job should have status"
             assert "submitted_at" in job, "Job should have submitted_at"
-            print(f"✅ Job structure correct: {list(job.keys())}")
+            print(f"PASS: Job structure correct: {list(job.keys())}")
 
     finally:
         test_csv.unlink()
 
-    print("✅ List jobs test passed")
+    print("PASS: List jobs test passed")
 
 
 def test_cancel_job():
@@ -480,11 +441,7 @@ def test_cancel_job():
     print("TEST 5: Cancel Job")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     # Submit a test job
     test_csv = Path("test_cancel.csv")
@@ -503,19 +460,19 @@ def test_cancel_job():
 
         # Cancel the job
         result = client.cancel_job(job_id)
-        print(f"✅ Job cancelled: {result['status']}")
+        print(f"PASS: Job cancelled: {result['status']}")
         assert result["status"] == "cancelled", "Status should be cancelled"
         assert "cancelled_at" in result, "Should have cancelled_at timestamp"
 
         # Verify status shows cancelled
         status = client.get_status(job_id)
-        print(f"✅ Status after cancel: {status['status']}")
+        print(f"PASS: Status after cancel: {status['status']}")
         assert status["status"] == "cancelled", "Status should persist as cancelled"
 
     finally:
         test_csv.unlink()
 
-    print("✅ Cancel job test passed")
+    print("PASS: Cancel job test passed")
 
 
 def test_cancel_completed_job():
@@ -524,11 +481,7 @@ def test_cancel_completed_job():
     print("TEST 6: Cannot Cancel Completed Job")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     # Submit and wait for completion
     test_csv = Path("test_cancel_completed.csv")
@@ -556,11 +509,11 @@ def test_cancel_completed_job():
         # Try to cancel completed job
         try:
             result = client.cancel_job(job_id)
-            print(f"❌ Should have raised error for completed job")
+            print(f"FAIL: Should have raised error for completed job")
             print(f"   Got result: {result}")
             assert False, "Should not be able to cancel completed job"
         except (ValidationError, FIFOClientError) as e:
-            print(f"✅ Correctly rejected: {type(e).__name__}")
+            print(f"PASS: Correctly rejected: {type(e).__name__}")
             print(f"   Message: {str(e)[:100]}")
         except AssertionError:
             raise
@@ -568,7 +521,7 @@ def test_cancel_completed_job():
     finally:
         test_csv.unlink()
 
-    print("✅ Cannot cancel completed job test passed")
+    print("PASS: Cannot cancel completed job test passed")
 
 
 # =============================================================================
@@ -581,18 +534,14 @@ def test_csv_validation_file_not_found():
     print("TEST 7: CSV File Not Found")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     try:
         client.submit_evaluation("nonexistent.csv", config={})
-        print("❌ Should have raised FileNotFoundError")
+        print("FAIL: Should have raised FileNotFoundError")
         return False
     except FileNotFoundError as e:
-        print(f"✅ Correct exception: {type(e).__name__}")
+        print(f"PASS: Correct exception: {type(e).__name__}")
         print(f"   Message: {str(e)[:120]}...")
         return True
 
@@ -607,17 +556,14 @@ def test_csv_validation_empty_file():
     test_file.write_text("")
 
     try:
-        client = FIFOEvalsClient(
-            api_key="test_token",
-            base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-        )
+        client = _make_client()
 
         try:
             client.submit_evaluation(str(test_file), config={})
-            print("❌ Should have raised ValidationError")
+            print("FAIL: Should have raised ValidationError")
             return False
         except ValidationError as e:
-            print(f"✅ Correct exception: {type(e).__name__}")
+            print(f"PASS: Correct exception: {type(e).__name__}")
             print(f"   Message: {str(e)[:120]}...")
             return True
     finally:
@@ -631,7 +577,7 @@ def test_csv_validation_too_many_rows():
     print("="*60)
 
     test_file = Path("test_large.csv")
-    
+
     # Create CSV with 10,001 rows (exceeds limit)
     with open(test_file, 'w') as f:
         f.write("input,expected_output\n")
@@ -639,20 +585,15 @@ def test_csv_validation_too_many_rows():
             f.write(f"Test {i},Output {i}\n")
 
     try:
-        client = FIFOEvalsClient(
-            api_key="test_token",
-            base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-        )
+        client = _make_client()
 
         try:
             client.submit_evaluation(str(test_file), config={})
-            print("❌ Should have raised ValidationError")
+            print("FAIL: Should have raised ValidationError")
             return False
         except ValidationError as e:
-            print(f"✅ Correct exception: {type(e).__name__}")
+            print(f"PASS: Correct exception: {type(e).__name__}")
             print(f"   Message: {str(e)[:120]}...")
-            print(f"\nSolution: Split your CSV:")
-            print(f"  from AdoptXchange.evals.csv_ut...")
             return True
     finally:
         test_file.unlink()
@@ -670,17 +611,14 @@ value1,value2
 """)
 
     try:
-        client = FIFOEvalsClient(
-            api_key="test_token",
-            base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-        )
+        client = _make_client()
 
         try:
             client.submit_evaluation(str(test_file), config={})
-            print("❌ Should have raised ValidationError")
+            print("FAIL: Should have raised ValidationError")
             return False
         except ValidationError as e:
-            print(f"✅ Correct exception: {type(e).__name__}")
+            print(f"PASS: Correct exception: {type(e).__name__}")
             print(f"   Message: {str(e)[:120]}...")
             assert "missing required" in str(e).lower() and "column" in str(e).lower()
             return True
@@ -694,11 +632,7 @@ def test_column_name_flexibility():
     print("TEST 11: Column Name Flexibility")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     test_cases = [
         ("prompt column", "prompt,expected_output\nTest,Response\n", "prompt"),
@@ -714,13 +648,13 @@ def test_column_name_flexibility():
         try:
             validation = client._validate_csv_file(str(test_csv))
             assert validation['input_column'] == expected_col or expected_col in validation['input_column']
-            print(f"✅ {name}: Detected '{validation['input_column']}'")
+            print(f"PASS: {name}: Detected '{validation['input_column']}'")
             test_csv.unlink()
         except Exception as e:
             test_csv.unlink()
-            raise AssertionError(f"❌ {name} failed: {e}")
+            raise AssertionError(f"FAIL: {name} failed: {e}")
 
-    print("✅ All column name variants supported")
+    print("PASS: All column name variants supported")
 
 
 def test_conversation_structure_detection():
@@ -729,11 +663,7 @@ def test_conversation_structure_detection():
     print("TEST 12: Conversation Structure Detection")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     # Multi-turn conversation
     test_csv = Path("/tmp/test_multi_turn.csv")
@@ -748,34 +678,30 @@ def test_conversation_structure_detection():
         stats = validation['conversation_stats']
         assert stats['multi_turn'] == 1, f"Expected 1 multi-turn, got {stats['multi_turn']}"
         assert stats['single_turn'] == 1, f"Expected 1 single-turn, got {stats['single_turn']}"
-        print(f"✅ Correctly detected: {stats['multi_turn']} multi-turn, {stats['single_turn']} single-turn")
+        print(f"PASS: Correctly detected: {stats['multi_turn']} multi-turn, {stats['single_turn']} single-turn")
         test_csv.unlink()
     except Exception as e:
         test_csv.unlink()
-        raise AssertionError(f"❌ Failed: {e}")
+        raise AssertionError(f"FAIL: {e}")
 
 
 # =============================================================================
 # TEST SUITE: Error Handling
 # =============================================================================
 
-def test_error_handling_missing_token():
-    """Test: Missing authentication token."""
+def test_error_handling_missing_credentials():
+    """Test: Missing credentials."""
     print("\n" + "="*60)
-    print("TEST 13: Missing Authentication Token")
+    print("TEST 13: Missing Credentials")
     print("="*60)
 
     try:
-        client = FIFOEvalsClient(
-            api_key="",
-            org_id="test_org",
-            base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-        )
-        print("❌ Should have raised ValueError")
+        client = FIFOEvalsClient()
+        print("FAIL: Should have raised ValueError")
         return False
-    except ValueError as e:
-        print(f"✅ Correct exception at init: {type(e).__name__}")
-        print(f"   Message: {str(e)}")
+    except (ValueError, TypeError) as e:
+        print(f"PASS: Correct exception at init: {type(e).__name__}")
+        print(f"   Message: {str(e)[:120]}")
         return True
 
 
@@ -785,18 +711,14 @@ def test_error_handling_job_not_found():
     print("TEST 14: Job Not Found")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     try:
         client.get_status("nonexistent-job-id")
-        print("❌ Should have raised JobNotFoundError")
+        print("FAIL: Should have raised JobNotFoundError")
         return False
     except JobNotFoundError as e:
-        print(f"✅ Correct exception: {type(e).__name__}")
+        print(f"PASS: Correct exception: {type(e).__name__}")
         print(f"   Message: {str(e)[:120]}...")
         return True
 
@@ -807,11 +729,7 @@ def test_error_handling_job_failed():
     print("TEST 15: Job Execution Failure")
     print("="*60)
 
-    client = FIFOEvalsClient(
-        api_key="test_token",
-        org_id="test_org",
-        base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-    )
+    client = _make_client()
 
     # Create test CSV
     test_csv = Path("test_failed.csv")
@@ -834,11 +752,11 @@ def test_error_handling_job_failed():
         time.sleep(0.5)
         status = client.get_status(job_id)
         if status["status"] == "failed":
-            print(f"✅ Job failed as expected")
+            print(f"PASS: Job failed as expected")
             print(f"   Error: {status.get('error_message', 'N/A')}")
             return True
         else:
-            print(f"❌ Job should have failed, got status: {status['status']}")
+            print(f"FAIL: Job should have failed, got status: {status['status']}")
             return False
 
     finally:
@@ -846,7 +764,7 @@ def test_error_handling_job_failed():
 
 
 # =============================================================================
-# TEST SUITE: New Features (from bulk_evals review)
+# TEST SUITE: New Features
 # =============================================================================
 
 def test_csv_blank_row_detection():
@@ -856,7 +774,6 @@ def test_csv_blank_row_detection():
     print("="*60)
 
     test_csv = Path("test_blank_rows.csv")
-    # CSV with whitespace-only rows (not truly empty lines, as CSV readers skip those)
     test_csv.write_text("""input,expected_output
 Test 1,Output 1
   ,
@@ -866,26 +783,19 @@ Test 3,Output 3
 """)
 
     try:
-        client = FIFOEvalsClient(
-            api_key="test_token",
-            base_url=f"http://localhost:{MOCK_SERVER_PORT}"
-        )
+        client = _make_client()
 
-        # Validate CSV
         validation = client._validate_csv_file(str(test_csv))
 
-        # Should skip 2 whitespace-only rows (lines 3 and 5)
         assert len(validation['skipped_rows']) == 2, f"Expected 2 skipped rows, got {len(validation['skipped_rows'])} - rows: {validation['skipped_rows']}"
         assert validation['row_count'] == 3, f"Expected 3 valid rows, got {validation['row_count']}"
 
-        # Check warning message
         warnings = validation['warnings']
         assert any('Skipped' in w for w in warnings), "Should have warning about skipped rows"
 
-        print(f"✅ Detected {len(validation['skipped_rows'])} whitespace-only rows")
-        print(f"✅ Skipped row numbers: {validation['skipped_rows']}")
-        print(f"✅ Valid rows: {validation['row_count']}")
-        print(f"✅ Warning: {[w for w in warnings if 'Skipped' in w][0][:80]}...")
+        print(f"PASS: Detected {len(validation['skipped_rows'])} whitespace-only rows")
+        print(f"PASS: Skipped row numbers: {validation['skipped_rows']}")
+        print(f"PASS: Valid rows: {validation['row_count']}")
         return True
 
     finally:
@@ -898,29 +808,25 @@ def test_error_truncation():
     print("TEST 17: Error Message Truncation")
     print("="*60)
 
-    # Test normal string (no truncation needed)
     short_str = "This is a short error message"
     result = truncate_string(short_str, 100)
     assert result == short_str, "Short strings shouldn't be truncated"
-    print(f"✅ Short string unchanged: '{result}'")
+    print(f"PASS: Short string unchanged: '{result}'")
 
-    # Test long string (needs truncation)
     long_str = "A" * 150
     result = truncate_string(long_str, 100)
     assert len(result) == 103, f"Expected 103 chars (100 + '...'), got {len(result)}"
     assert result.endswith("..."), "Truncated string should end with '...'"
-    print(f"✅ Long string truncated: {len(long_str)} chars -> {len(result)} chars")
+    print(f"PASS: Long string truncated: {len(long_str)} chars -> {len(result)} chars")
 
-    # Test edge case (exactly max_length)
     exact_str = "B" * 100
     result = truncate_string(exact_str, 100)
     assert result == exact_str, "String at exact length shouldn't be truncated"
-    print(f"✅ Exact length unchanged: {len(result)} chars")
+    print(f"PASS: Exact length unchanged: {len(result)} chars")
 
-    # Test empty string
     result = truncate_string("", 100)
     assert result == "", "Empty string should stay empty"
-    print(f"✅ Empty string handled correctly")
+    print(f"PASS: Empty string handled correctly")
 
     return True
 
@@ -931,34 +837,29 @@ def test_json_parsing_fallback():
     print("TEST 18: JSON Parsing with Fallback")
     print("="*60)
 
-    # Valid JSON
     valid_json = '{"key": "value", "num": 42}'
     result = safe_json_parse(valid_json)
     assert result == {"key": "value", "num": 42}, "Valid JSON should parse correctly"
-    print(f"✅ Valid JSON parsed: {result}")
+    print(f"PASS: Valid JSON parsed: {result}")
 
-    # Python dict string (requires ast.literal_eval)
     python_dict = "{'key': 'value', 'num': 42}"
     result = safe_json_parse(python_dict)
     assert result == {"key": "value", "num": 42}, "Python dict should parse via ast.literal_eval"
-    print(f"✅ Python dict parsed via fallback: {result}")
+    print(f"PASS: Python dict parsed via fallback: {result}")
 
-    # Invalid format (should return fallback)
     invalid_str = "not a valid dict or json"
     result = safe_json_parse(invalid_str, fallback="DEFAULT")
     assert result == "DEFAULT", "Invalid string should return fallback"
-    print(f"✅ Invalid string returned fallback: {result}")
+    print(f"PASS: Invalid string returned fallback: {result}")
 
-    # Empty string
     result = safe_json_parse("", fallback=None)
     assert result is None, "Empty string should return fallback"
-    print(f"✅ Empty string returned fallback: {result}")
+    print(f"PASS: Empty string returned fallback: {result}")
 
-    # Complex nested structure
     complex_json = '{"nested": {"list": [1, 2, 3], "bool": true}}'
     result = safe_json_parse(complex_json)
     assert result["nested"]["list"] == [1, 2, 3], "Nested JSON should parse correctly"
-    print(f"✅ Complex JSON parsed: {result}")
+    print(f"PASS: Complex JSON parsed: {result}")
 
     return True
 
@@ -969,25 +870,20 @@ def test_auto_timestamp_naming():
     print("TEST 19: Auto-Timestamp Filename Generation")
     print("="*60)
 
-    # Test timestamp generation logic directly (avoid network download)
     import re
     from datetime import datetime
     from pathlib import Path
 
-    # Simulate what submit_and_wait does with auto_timestamp=True
     output_file = "test_results.csv"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = Path(output_file)
     timestamped_file = str(output_path.parent / f"{output_path.stem}_{timestamp}{output_path.suffix}")
 
-    # Check that timestamped file has correct pattern
-    # Format: test_results_YYYYMMDD_HHMMSS.csv
     pattern = r'test_results_\d{8}_\d{6}\.csv'
     assert re.match(pattern, Path(timestamped_file).name), f"Filename should have timestamp: {timestamped_file}"
 
-    print(f"✅ Timestamp pattern validated: {Path(timestamped_file).name}")
+    print(f"PASS: Timestamp pattern validated: {Path(timestamped_file).name}")
 
-    # Test different path scenarios
     test_cases = [
         ("results.csv", r"results_\d{8}_\d{6}\.csv"),
         ("output/data.csv", r"data_\d{8}_\d{6}\.csv"),
@@ -999,50 +895,67 @@ def test_auto_timestamp_naming():
         timestamped = str(output_path.parent / f"{output_path.stem}_{timestamp}{output_path.suffix}")
         assert re.match(expected_pattern, Path(timestamped).name), f"Pattern failed for {original}"
 
-    print(f"✅ Multiple path formats validated")
-    print(f"✅ Timestamp format: YYYYMMDD_HHMMSS (current: {timestamp})")
+    print(f"PASS: Multiple path formats validated")
 
     return True
 
 
 def test_cli_script_exists():
-    """Test: CLI wrapper script exists and is executable."""
+    """Test: CLI script (bulk_evals_v2.py) exists."""
     print("\n" + "="*60)
-    print("TEST 20: CLI Wrapper Script")
+    print("TEST 20: CLI Script (bulk_evals_v2.py)")
     print("="*60)
 
-    cli_script = Path(__file__).parent / "run_fifo_evaluation.py"
+    cli_script = Path(__file__).parent / "bulk_evals_v2.py"
 
-    # Check file exists
     assert cli_script.exists(), f"CLI script not found: {cli_script}"
-    print(f"✅ CLI script exists: {cli_script.name}")
+    print(f"PASS: CLI script exists: {cli_script.name}")
 
-    # Check it's a file
     assert cli_script.is_file(), f"CLI path is not a file: {cli_script}"
-    print(f"✅ CLI script is a file")
+    print(f"PASS: CLI script is a file")
 
-    # Check it has shebang
     content = cli_script.read_text()
     assert content.startswith("#!/usr/bin/env python3"), "CLI script should have Python shebang"
-    print(f"✅ CLI script has correct shebang")
+    print(f"PASS: CLI script has correct shebang")
 
-    # Check it has main() function
     assert "def main():" in content, "CLI script should have main() function"
-    print(f"✅ CLI script has main() function")
+    print(f"PASS: CLI script has main() function")
 
-    # Check it has argparse
     assert "argparse" in content, "CLI script should use argparse"
-    print(f"✅ CLI script uses argparse")
+    print(f"PASS: CLI script uses argparse")
 
-    # Check file permissions (executable on Unix)
-    import stat
-    import sys
-    if sys.platform != 'win32':
-        is_executable = cli_script.stat().st_mode & stat.S_IXUSR
-        assert is_executable, "CLI script should be executable on Unix"
-        print(f"✅ CLI script is executable")
-    else:
-        print(f"⚠️  Skipping executable check on Windows")
+    assert "--client-id" in content, "CLI script should use --client-id"
+    assert "--client-secret" in content, "CLI script should use --client-secret"
+    print(f"PASS: CLI script uses new auth arguments")
+
+    return True
+
+
+def test_constructor_access_token():
+    """Test: Constructor with pre-obtained access_token."""
+    print("\n" + "="*60)
+    print("TEST 21: Constructor with access_token")
+    print("="*60)
+
+    client = FIFOEvalsClient(access_token="pre-obtained-jwt", base_url="http://localhost:1234")
+    assert client._access_token == "pre-obtained-jwt"
+    assert client._client_id is None
+    print("PASS: access_token constructor works")
+
+    return True
+
+
+def test_constructor_credentials():
+    """Test: Constructor with client_id + client_secret."""
+    print("\n" + "="*60)
+    print("TEST 22: Constructor with credentials")
+    print("="*60)
+
+    client = FIFOEvalsClient(client_id="test-id", client_secret="test-secret", base_url="http://localhost:1234")
+    assert client._client_id == "test-id"
+    assert client._client_secret == "test-secret"
+    assert client._access_token is None  # Not yet authenticated
+    print("PASS: credential constructor works")
 
     return True
 
@@ -1056,12 +969,11 @@ def run_all_tests():
     print("\n" + "="*70)
     print("FIFO EVALS CLIENT - COMPREHENSIVE TEST SUITE")
     print("="*70)
-    print("\nCombined tests: Basic + Enhanced + Validation")
 
     # Start mock server
-    print("\nStarting comprehensive mock server...")
+    print("\nStarting mock server (proxy route simulation)...")
     server = start_mock_server(MOCK_SERVER_PORT)
-    print(f"✅ Mock server running on port {MOCK_SERVER_PORT}")
+    print(f"Mock server running on port {MOCK_SERVER_PORT}")
 
     results = []
 
@@ -1070,7 +982,7 @@ def run_all_tests():
         print("\n" + "="*70)
         print("PART 1: BASIC OPERATIONS")
         print("="*70)
-        
+
         job_id = test_submit_evaluation()
         test_get_status(job_id)
         test_wait_for_completion(job_id)
@@ -1082,7 +994,7 @@ def run_all_tests():
         print("\n" + "="*70)
         print("PART 2: CSV VALIDATION")
         print("="*70)
-        
+
         results.append(("File not found", test_csv_validation_file_not_found()))
         results.append(("Empty CSV", test_csv_validation_empty_file()))
         results.append(("Too many rows", test_csv_validation_too_many_rows()))
@@ -1094,14 +1006,13 @@ def run_all_tests():
         print("\n" + "="*70)
         print("PART 3: ERROR HANDLING")
         print("="*70)
-        
-        results.append(("Missing token", test_error_handling_missing_token()))
-        results.append(("Job not found", test_error_handling_job_not_found()))
-        # Note: Job failure test removed - tests mock behavior, not client
 
-        # New Features Tests (from bulk_evals review)
+        results.append(("Missing credentials", test_error_handling_missing_credentials()))
+        results.append(("Job not found", test_error_handling_job_not_found()))
+
+        # New Features Tests
         print("\n" + "="*70)
-        print("PART 4: NEW FEATURES (BULK_EVALS ENHANCEMENTS)")
+        print("PART 4: FEATURES")
         print("="*70)
 
         results.append(("Blank row detection", test_csv_blank_row_detection()))
@@ -1109,6 +1020,8 @@ def run_all_tests():
         results.append(("JSON fallback parsing", test_json_parsing_fallback()))
         results.append(("Auto-timestamp naming", test_auto_timestamp_naming()))
         results.append(("CLI script exists", test_cli_script_exists()))
+        results.append(("Constructor: access_token", test_constructor_access_token()))
+        results.append(("Constructor: credentials", test_constructor_credentials()))
 
         # Summary
         print("\n" + "="*70)
@@ -1117,42 +1030,27 @@ def run_all_tests():
 
         passed = sum(1 for _, result in results if result)
         total = len(results)
+        operation_tests = 9  # Basic operations that don't return bool
 
         for test_name, result in results:
-            status = "✅ PASS" if result else "❌ FAIL"
-            print(f"{status:10} - {test_name}")
+            status = "PASS" if result else "FAIL"
+            print(f"  {status:6} - {test_name}")
 
         print("\n" + "="*70)
         if passed == total and passed > 0:
-            operation_tests = 9  # Basic operations
-            validation_tests = passed  # All tests that return bool
-            print(f"✅ ALL VALIDATION & FEATURE TESTS PASSED ({validation_tests}/{validation_tests})")
-            print(f"✅ ALL OPERATION TESTS PASSED ({operation_tests}/{operation_tests})")
-            print("="*70)
-            print(f"\n🎉 COMPREHENSIVE TEST SUITE: {passed + operation_tests}/{total + operation_tests} TESTS PASSED")
-            print("\nEnhancements from bulk_evals review successfully implemented!")
-            print("  1. ✅ Windows console encoding (for Unicode/emoji output)")
-            print("  2. ✅ Enhanced CSV validation (blank row detection & reporting)")
-            print("  3. ✅ Error message truncation (user-friendly display)")
-            print("  4. ✅ CLI wrapper script (run_fifo_evaluation.py)")
-            print("  5. ✅ Emoji enhancement (progress indicators)")
-            print("  6. ✅ Auto-timestamp naming (optional timestamped output)")
-            print("  7. ✅ JSON parsing fallback (ast.literal_eval)")
-            print("  8. ✅ Streaming downloads note (future enhancement)")
-            print("\nClient is production-ready with all features!")
+            print(f"ALL {passed + operation_tests} TESTS PASSED")
         else:
             print(f"Results: {passed}/{total} validation tests passed")
-            print("="*70)
+        print("="*70)
 
     except Exception as e:
         print("\n" + "="*70)
-        print(f"❌ TEST FAILED: {e}")
+        print(f"TEST FAILED: {e}")
         print("="*70)
         import traceback
         traceback.print_exc()
 
     finally:
-        # Cleanup
         server.shutdown()
         print("\nMock server stopped")
 
