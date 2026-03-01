@@ -27,7 +27,20 @@ class AdoptActionRunRequest(BaseModel):
     action_id: str = Field(default="", description="Specific action ID to execute")
     execution_type: str = Field(default="DEFAULT", description="Execution type (DEFAULT or TOOL)")
 
+class AdoptRunActionByIdRequest(BaseModel):
+    """Class to define the models for the Adopt API"""
+    action_id: str = Field(default="", description="Specific action ID to execute")
+    user_input: str = Field(default="", description="User input")
+    profile: dict[str, Any] = Field(default_factory=dict, description="Profile")
+    workflow_params: dict[str, Any] = Field(default_factory=dict, description="Workflow parameters")
+
 class AdoptActionRunResponse(BaseModel):
     """Class to define the models for the Adopt API"""
     status: bool = Field(default=False, description="Status of the action run")
     response: str = Field(default="", description="Response from the action run")
+
+class ToolsConfig(BaseModel):
+    """Class to define the models for the Adopt API"""
+    capability_keys: List[str] = Field(default_factory=list, description="List of capability keys")
+    profile: dict[str, Any] = Field(default_factory=dict, description="Profile")
+    execution_type: str = Field(default="DEFAULT", description="Execution type (DEFAULT or TOOL)")

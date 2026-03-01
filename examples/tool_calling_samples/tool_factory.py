@@ -4,9 +4,8 @@ import json
 from langchain_core.tools import tool, ToolException
 from typing import Dict, Any, List, Callable, Optional, Type
 from pydantic import BaseModel, Field, create_model
-from examples.models import AdoptAction
-from examples.action_api_samples.api_sample import run_action_by_id
-
+from examples.models import AdoptAction, AdoptRunActionByIdRequest
+from examples.action_api_samples.adopt_client import AdoptClient
 
 def sanitize_tool_name(title: str) -> str:
     """Convert action title to valid Python identifier.
@@ -162,7 +161,7 @@ def create_tool_schema(capability: AdoptAction) -> Optional[Type[BaseModel]]:
     )
 
 
-def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Callable:
+def create_adopt_tool(client: AdoptClient, capability: AdoptAction, profile: Dict[str, Any]) -> Callable:
     """Dynamically create a LangChain tool for an Adopt capability.
     
     This function creates a closure that captures the capability and profile,
@@ -185,7 +184,7 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
     
     # Create the inner function that will be decorated
     # Use **kwargs to accept any parameters the LLM might provide
-    def tool_func(**kwargs) -> str:
+    async def tool_func(**kwargs) -> str:
         """Execute this Adopt action with the provided input.
         
         Args:
@@ -238,13 +237,14 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
                 if not user_input:
                     # Use the action description as a more natural query
                     user_input = capability.description or capability.title
-            
-            result = run_action_by_id(
+            print("user_input", user_input)
+            request = AdoptRunActionByIdRequest(
                 action_id=capability.id,
                 user_input=user_input,
                 profile=profile,
-                workflow_params=workflow_params if workflow_params else None
+                workflow_params=workflow_params if workflow_params else {}
             )
+            result = await client.run_action_by_id(request)
             return result
         except Exception as e:
             raise ToolException(f"Failed to execute {capability.title}: {str(e)}")
@@ -263,6 +263,7 @@ def create_adopt_tool(capability: AdoptAction, profile: Dict[str, Any]) -> Calla
 
 
 def create_all_tools(
+    client: AdoptClient,
     capabilities: List[AdoptAction],
     profile: Dict[str, Any]
 ) -> List[Callable]:
@@ -282,8 +283,7 @@ def create_all_tools(
     tools = []
     
     for capability in capabilities:
-        tool_func = create_adopt_tool(capability, profile)
+        tool_func = create_adopt_tool(client, capability, profile)
         tools.append(tool_func)
     
     return tools
-

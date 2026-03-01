@@ -1,0 +1,20 @@
+# Core dependencies
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# AWS and LangChain dependencies
+langchain>=1.1.0
+langchain-core>=1.1.0
+langchain-community>=0.4.1
+langchain-aws>=0.2.0
+langgraph>=0.6.4
+langchain-openai>=0.3.33
+
+# Typing support
+typing-extensions>=4.5.0
+
+# For API requests
+requests>=2.31.0
+
+# JSON handling
+json5>=0.9.14
